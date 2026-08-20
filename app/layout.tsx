@@ -3,7 +3,7 @@ import { headers } from "next/headers";
 import "./globals.css";
 
 const title = "RIVER 德扑竞技 | 沉浸式德州扑克";
-const description = "沉浸式德州扑克牌桌，实时显示每位玩家的手牌状态、下注动作、牌局战绩与账户资金流水。";
+const description = "沉浸式德州扑克锦标赛：随机洗牌、实时行动、河牌摊牌、自动比牌结算，直到一名玩家赢得全部筹码。";
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();

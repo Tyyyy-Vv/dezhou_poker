@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 type View = "table" | "account";
 type RecordTab = "funds" | "games";
 
-type ActionType = "raise" | "call" | "check" | "fold" | "thinking" | "waiting";
+type ActionType = "raise" | "call" | "check" | "fold" | "thinking" | "waiting" | "allin" | "win" | "out";
 
 type PlayerAction = {
   label: string;
@@ -15,19 +15,183 @@ type PlayerAction = {
 };
 
 const players = [
-  { id: "azhe", name: "阿哲", stack: "8,420", className: "seat top" },
-  { id: "mia", name: "Mia", stack: "4,680", className: "seat right" },
-  { id: "oldfox", name: "Old Fox", stack: "11,200", className: "seat left" },
-  { id: "kai", name: "Kai", stack: "6,740", className: "seat bottom-left" },
-  { id: "lynn", name: "Lynn", stack: "9,060", className: "seat bottom-right" },
+  { id: "azhe", name: "阿哲", className: "seat top" },
+  { id: "mia", name: "Mia", className: "seat right" },
+  { id: "oldfox", name: "Old Fox", className: "seat left" },
+  { id: "kai", name: "Kai", className: "seat bottom-left" },
+  { id: "lynn", name: "Lynn", className: "seat bottom-right" },
 ];
 
-const initialPlayerActions: Record<string, PlayerAction> = {
-  azhe: { label: "加注至 ¥320", type: "raise", committed: 320 },
-  mia: { label: "跟注 ¥320", type: "call", committed: 320 },
-  oldfox: { label: "弃牌", type: "fold", committed: 0, folded: true },
-  kai: { label: "过牌", type: "check", committed: 0 },
-  lynn: { label: "等待行动", type: "waiting", committed: 0 },
+const tableNames: Record<string, string> = {
+  hero: "我",
+  azhe: "阿哲",
+  mia: "Mia",
+  oldfox: "Old Fox",
+  kai: "Kai",
+  lynn: "Lynn",
+};
+
+const playerIds = ["hero", "azhe", "mia", "oldfox", "kai", "lynn"];
+const initialStacks: Record<string, number> = Object.fromEntries(playerIds.map((id) => [id, 2000]));
+const suits = ["♠", "♥", "♦", "♣"] as const;
+const ranks = [
+  { rank: "2", value: 2 }, { rank: "3", value: 3 }, { rank: "4", value: 4 },
+  { rank: "5", value: 5 }, { rank: "6", value: 6 }, { rank: "7", value: 7 },
+  { rank: "8", value: 8 }, { rank: "9", value: 9 }, { rank: "10", value: 10 },
+  { rank: "J", value: 11 }, { rank: "Q", value: 12 }, { rank: "K", value: 13 }, { rank: "A", value: 14 },
+];
+
+type Card = { rank: string; value: number; suit: typeof suits[number] };
+type GamePhase = "betting" | "opponents" | "river" | "showdown" | "payout" | "gameover";
+type ActionLogItem = { name: string; text: string; time: string; type: string };
+type HandResult = { winnerIds: string[]; label: string; amount: number };
+
+type GameState = {
+  handNumber: number;
+  handCode: number;
+  bigBlind: number;
+  stacks: Record<string, number>;
+  hands: Record<string, Card[]>;
+  board: Card[];
+  visibleBoard: number;
+  folded: Record<string, boolean>;
+  actions: Record<string, PlayerAction>;
+  actingPlayer: string | null;
+  pot: number;
+  lastPot: number;
+  callAmount: number;
+  phase: GamePhase;
+  prompt: string;
+  heroAction: string;
+  log: ActionLogItem[];
+  result: HandResult | null;
+  championId: string | null;
+};
+
+const seededRandom = (seed: number) => () => {
+  seed |= 0;
+  seed = seed + 0x6d2b79f5 | 0;
+  let value = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  value = value + Math.imul(value ^ value >>> 7, 61 | value) ^ value;
+  return ((value ^ value >>> 14) >>> 0) / 4294967296;
+};
+
+const createDeck = () => suits.flatMap((suit) => ranks.map(({ rank, value }) => ({ rank, value, suit })));
+
+const shuffle = <T,>(items: T[], random: () => number = Math.random) => {
+  const result = [...items];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1));
+    [result[index], result[target]] = [result[target], result[index]];
+  }
+  return result;
+};
+
+const compareScores = (left: number[], right: number[]) => {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    if ((left[index] ?? 0) !== (right[index] ?? 0)) return (left[index] ?? 0) - (right[index] ?? 0);
+  }
+  return 0;
+};
+
+const evaluateFive = (cards: Card[]) => {
+  const values = cards.map((card) => card.value).sort((a, b) => b - a);
+  const counts = new Map<number, number>();
+  values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+  const groups = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0]);
+  const unique = [...new Set(values)];
+  if (unique.includes(14)) unique.push(1);
+  let straightHigh = 0;
+  for (let index = 0; index <= unique.length - 5; index += 1) {
+    if (unique[index] - unique[index + 4] === 4) straightHigh = Math.max(straightHigh, unique[index]);
+  }
+  const flush = cards.every((card) => card.suit === cards[0].suit);
+
+  if (flush && straightHigh) return { score: [8, straightHigh], label: "同花顺" };
+  if (groups[0][1] === 4) return { score: [7, groups[0][0], groups[1][0]], label: "四条" };
+  if (groups[0][1] === 3 && groups[1][1] === 2) return { score: [6, groups[0][0], groups[1][0]], label: "葫芦" };
+  if (flush) return { score: [5, ...values], label: "同花" };
+  if (straightHigh) return { score: [4, straightHigh], label: "顺子" };
+  if (groups[0][1] === 3) return { score: [3, groups[0][0], ...groups.slice(1).map(([value]) => value).sort((a, b) => b - a)], label: "三条" };
+  if (groups[0][1] === 2 && groups[1][1] === 2) {
+    const pairs = [groups[0][0], groups[1][0]].sort((a, b) => b - a);
+    return { score: [2, ...pairs, groups.find(([, count]) => count === 1)?.[0] ?? 0], label: "两对" };
+  }
+  if (groups[0][1] === 2) return { score: [1, groups[0][0], ...groups.slice(1).map(([value]) => value).sort((a, b) => b - a)], label: "一对" };
+  return { score: [0, ...values], label: "高牌" };
+};
+
+const bestHand = (cards: Card[]) => {
+  if (cards.length < 5) return { score: [0, ...cards.map((card) => card.value).sort((a, b) => b - a)], label: "高牌" };
+  let best = { score: [-1], label: "高牌" };
+  for (let a = 0; a < cards.length - 4; a += 1) {
+    for (let b = a + 1; b < cards.length - 3; b += 1) {
+      for (let c = b + 1; c < cards.length - 2; c += 1) {
+        for (let d = c + 1; d < cards.length - 1; d += 1) {
+          for (let e = d + 1; e < cards.length; e += 1) {
+            const result = evaluateFive([cards[a], cards[b], cards[c], cards[d], cards[e]]);
+            if (compareScores(result.score, best.score) > 0) best = result;
+          }
+        }
+      }
+    }
+  }
+  return best;
+};
+
+const createHand = (previousStacks: Record<string, number>, handNumber: number, seed?: number): GameState => {
+  const random = seed === undefined ? Math.random : seededRandom(seed);
+  const activeIds = playerIds.filter((id) => previousStacks[id] > 0);
+  const deck = shuffle(createDeck(), random);
+  const hands: Record<string, Card[]> = {};
+  activeIds.forEach((id) => { hands[id] = []; });
+  for (let round = 0; round < 2; round += 1) activeIds.forEach((id) => hands[id].push(deck.pop()!));
+  const board = Array.from({ length: 5 }, () => deck.pop()!);
+  const bigBlind = Math.min(640, 40 * 2 ** Math.floor((handNumber - 1) / 4));
+  const ante = Math.max(10, Math.floor(bigBlind / 2));
+  const stacks = { ...previousStacks };
+  const actions: Record<string, PlayerAction> = {};
+  const folded: Record<string, boolean> = {};
+  let pot = 0;
+
+  playerIds.forEach((id) => {
+    if (!activeIds.includes(id)) {
+      folded[id] = true;
+      actions[id] = { label: "已淘汰", type: "out", committed: 0, folded: true };
+      return;
+    }
+    const paid = Math.min(ante, stacks[id]);
+    stacks[id] -= paid;
+    pot += paid;
+    folded[id] = false;
+    actions[id] = stacks[id] === 0
+      ? { label: `前注全下 ¥${paid}`, type: "allin", committed: paid }
+      : { label: `前注 ¥${paid}`, type: "waiting", committed: paid };
+  });
+
+  const heroCanAct = Boolean(hands.hero) && stacks.hero > 0;
+  const callAmount = bigBlind;
+  return {
+    handNumber,
+    handCode: 820000 + Math.floor(random() * 9999),
+    bigBlind,
+    stacks,
+    hands,
+    board,
+    visibleBoard: 4,
+    folded,
+    actions,
+    actingPlayer: heroCanAct ? "hero" : null,
+    pot,
+    lastPot: 0,
+    callAmount,
+    phase: "betting",
+    prompt: heroCanAct ? `转牌圈 · 跟注 ¥${Math.min(callAmount, stacks.hero)}` : "你已淘汰 · 自动观战",
+    heroAction: stacks.hero === 0 && hands.hero ? "前注全下" : "",
+    log: [{ name: "系统", text: `第 ${handNumber} 手牌已发出`, time: "刚刚", type: "deal" }],
+    result: null,
+    championId: null,
+  };
 };
 
 const transactions = [
@@ -61,22 +225,17 @@ export default function Home() {
   const [view, setView] = useState<View>("table");
   const [recordTab, setRecordTab] = useState<RecordTab>("funds");
   const [showRaise, setShowRaise] = useState(false);
-  const [raiseAmount, setRaiseAmount] = useState(800);
+  const [raiseAmount, setRaiseAmount] = useState(120);
   const [notice, setNotice] = useState("");
-  const [playerActions, setPlayerActions] = useState(initialPlayerActions);
-  const [actingPlayer, setActingPlayer] = useState<string | null>(null);
-  const [heroAction, setHeroAction] = useState("");
-  const [actionPrompt, setActionPrompt] = useState("跟注 ¥320");
-  const [callAmount, setCallAmount] = useState(320);
-  const [handPot, setHandPot] = useState(1240);
-  const [isResolving, setIsResolving] = useState(false);
-  const [actionLog, setActionLog] = useState([
-    { name: "阿哲", text: "加注至 ¥320", time: "刚刚", type: "raise" },
-    { name: "Mia", text: "跟注 ¥320", time: "8 秒前", type: "call" },
-    { name: "Old Fox", text: "弃牌", time: "12 秒前", type: "fold" },
-    { name: "系统", text: "发出转牌 4♦", time: "19 秒前", type: "deal" },
-  ]);
+  const [game, setGame] = useState<GameState>(() => createHand(initialStacks, 1, 829104));
   const actionTimers = useRef<number[]>([]);
+  const clientShuffled = useRef(false);
+
+  useEffect(() => {
+    if (clientShuffled.current) return;
+    clientShuffled.current = true;
+    setGame(createHand(initialStacks, 1));
+  }, []);
 
   useEffect(() => () => {
     actionTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -96,54 +255,195 @@ export default function Home() {
     actionTimers.current.push(window.setTimeout(callback, delay));
   };
 
-  const updateOpponent = (id: string, action: PlayerAction) => {
-    setPlayerActions((current) => ({ ...current, [id]: action }));
+  const resolveShowdown = (current: GameState): GameState => {
+    const contenders = playerIds.filter((id) => current.hands[id] && !current.folded[id]);
+    if (contenders.length === 0) return current;
+
+    const ranked = contenders.map((id) => ({ id, ...bestHand([...current.hands[id], ...current.board]) }));
+    ranked.sort((left, right) => compareScores(right.score, left.score));
+    const winningScore = ranked[0].score;
+    const winnerIds = ranked.filter((entry) => compareScores(entry.score, winningScore) === 0).map((entry) => entry.id);
+    const stacks = { ...current.stacks };
+    const share = Math.floor(current.pot / winnerIds.length);
+    let remainder = current.pot - share * winnerIds.length;
+    winnerIds.forEach((id) => {
+      stacks[id] += share + (remainder > 0 ? 1 : 0);
+      remainder = Math.max(0, remainder - 1);
+    });
+
+    const actions = { ...current.actions };
+    ranked.forEach((entry) => {
+      actions[entry.id] = {
+        label: winnerIds.includes(entry.id) ? `${entry.label} · 赢得 ¥${current.pot}` : entry.label,
+        type: winnerIds.includes(entry.id) ? "win" : "waiting",
+        committed: actions[entry.id]?.committed ?? 0,
+      };
+    });
+    const winnersText = winnerIds.map((id) => tableNames[id]).join("、");
+    const resultLabel = contenders.length === 1 ? "其他玩家均已弃牌" : ranked[0].label;
+    const alive = playerIds.filter((id) => stacks[id] > 0);
+
+    return {
+      ...current,
+      stacks,
+      actions,
+      actingPlayer: null,
+      visibleBoard: 5,
+      lastPot: current.pot,
+      pot: 0,
+      phase: "payout",
+      prompt: `${winnersText} 以${resultLabel}赢得 ¥${current.pot}`,
+      result: { winnerIds, label: resultLabel, amount: current.pot },
+      championId: alive.length === 1 ? alive[0] : null,
+      log: [{ name: winnersText, text: `${resultLabel} · 赢得 ¥${current.pot}`, time: "刚刚", type: "win" }, ...current.log].slice(0, 6),
+    };
   };
 
-  const addActionLog = (name: string, text: string, type: string) => {
-    setActionLog((current) => [{ name, text, time: "刚刚", type }, ...current].slice(0, 5));
-  };
-
-  const beginOpponentSequence = (label: string, contribution: number) => {
-    if (isResolving) return;
+  const dealNextHand = () => {
     actionTimers.current.forEach((timer) => window.clearTimeout(timer));
     actionTimers.current = [];
-    setIsResolving(true);
     setShowRaise(false);
-    setHeroAction(label);
-    setActionPrompt("其他玩家行动中…");
-    setHandPot((current) => current + contribution);
-
-    schedule(() => {
-      setActingPlayer("lynn");
-      updateOpponent("lynn", { label: "思考中", type: "thinking", committed: 0 });
-    }, 450);
-
-    schedule(() => {
-      updateOpponent("lynn", { label: "跟注 ¥320", type: "call", committed: 320 });
-      addActionLog("Lynn", "跟注 ¥320", "call");
-      setHandPot((current) => current + 320);
-      setActingPlayer("kai");
-      updateOpponent("kai", { label: "思考中", type: "thinking", committed: 0 });
-    }, 1450);
-
-    schedule(() => {
-      updateOpponent("kai", { label: "弃牌", type: "fold", committed: 0, folded: true });
-      addActionLog("Kai", "弃牌", "fold");
-      setActingPlayer("azhe");
-      updateOpponent("azhe", { label: "思考中", type: "thinking", committed: 320 });
-    }, 2550);
-
-    schedule(() => {
-      updateOpponent("azhe", { label: "加注至 ¥960", type: "raise", committed: 960 });
-      addActionLog("阿哲", "加注至 ¥960", "raise");
-      setHandPot((current) => current + 640);
-      setActingPlayer(null);
-      setCallAmount(640);
-      setActionPrompt("阿哲再加注 · 需补 ¥640");
-      setIsResolving(false);
-    }, 3750);
+    setGame((current) => {
+      const alive = playerIds.filter((id) => current.stacks[id] > 0);
+      if (alive.length === 1) return { ...current, phase: "gameover", championId: alive[0], prompt: `${tableNames[alive[0]]} 赢得本场锦标赛` };
+      return createHand(current.stacks, current.handNumber + 1);
+    });
   };
+
+  const applyOpponentDecision = (id: string) => {
+    setGame((current) => {
+      if (!current.hands[id] || current.folded[id] || current.stacks[id] === 0) return { ...current, actingPlayer: null };
+      const handStrength = bestHand([...current.hands[id], ...current.board.slice(0, 4)]).score[0];
+      const holePair = current.hands[id][0].value === current.hands[id][1].value;
+      const contenders = playerIds.filter((playerId) => current.hands[playerId] && !current.folded[playerId]);
+      const mustContinue = contenders.length <= 1;
+      const foldChance = Math.max(.08, .34 - handStrength * .045 - (holePair ? .1 : 0));
+      const shouldFold = !mustContinue && Math.random() < foldChance;
+      const stacks = { ...current.stacks };
+      const folded = { ...current.folded };
+      const actions = { ...current.actions };
+      let pot = current.pot;
+      let text = "";
+      let type: ActionType = "call";
+
+      if (shouldFold) {
+        folded[id] = true;
+        text = "弃牌";
+        type = "fold";
+        actions[id] = { label: text, type, committed: actions[id].committed, folded: true };
+      } else {
+        const contribution = Math.min(current.callAmount, stacks[id]);
+        stacks[id] -= contribution;
+        pot += contribution;
+        const allIn = stacks[id] === 0;
+        text = allIn ? `全下 ¥${contribution}` : contribution > 0 ? `跟注 ¥${contribution}` : "过牌";
+        type = allIn ? "allin" : contribution > 0 ? "call" : "check";
+        actions[id] = { label: text, type, committed: actions[id].committed + contribution };
+      }
+
+      return {
+        ...current,
+        stacks,
+        folded,
+        actions,
+        actingPlayer: null,
+        pot,
+        log: [{ name: tableNames[id], text, time: "刚刚", type }, ...current.log].slice(0, 6),
+      };
+    });
+  };
+
+  const beginOpponentSequence = (label: string, requestedContribution: number, foldHero = false) => {
+    if (game.phase !== "betting") return;
+    actionTimers.current.forEach((timer) => window.clearTimeout(timer));
+    actionTimers.current = [];
+    setShowRaise(false);
+    const contribution = foldHero || !game.hands.hero ? 0 : Math.min(requestedContribution, game.stacks.hero);
+    const opponentCall = requestedContribution > game.callAmount ? requestedContribution : game.callAmount;
+    setGame((current) => {
+      const stacks = { ...current.stacks, hero: current.stacks.hero - contribution };
+      const folded = { ...current.folded, hero: foldHero || !current.hands.hero };
+      const actions = {
+        ...current.actions,
+        hero: {
+          label,
+          type: foldHero ? "fold" : stacks.hero === 0 ? "allin" : contribution > 0 ? requestedContribution > current.callAmount ? "raise" : "call" : "waiting",
+          committed: (current.actions.hero?.committed ?? 0) + contribution,
+          folded: foldHero,
+        } as PlayerAction,
+      };
+      return {
+        ...current,
+        stacks,
+        folded,
+        actions,
+        phase: "opponents",
+        actingPlayer: null,
+        callAmount: opponentCall,
+        heroAction: label,
+        pot: current.pot + contribution,
+        prompt: "其他玩家正在依次行动…",
+        log: [{ name: "我", text: label, time: "刚刚", type: foldHero ? "fold" : "call" }, ...current.log].slice(0, 6),
+      };
+    });
+
+    const opponentOrder = shuffle(players.map((player) => player.id).filter((id) => game.hands[id] && game.stacks[id] > 0));
+    opponentOrder.forEach((id, index) => {
+      const start = 450 + index * 1050;
+      schedule(() => {
+        setGame((current) => ({
+          ...current,
+          actingPlayer: id,
+          actions: { ...current.actions, [id]: { ...current.actions[id], label: "思考中", type: "thinking" } },
+        }));
+      }, start);
+      schedule(() => applyOpponentDecision(id), start + 700);
+    });
+
+    const riverDelay = 650 + opponentOrder.length * 1050;
+    schedule(() => {
+      setGame((current) => ({
+        ...current,
+        phase: "river",
+        actingPlayer: null,
+        visibleBoard: 5,
+        prompt: `河牌 ${current.board[4].rank}${current.board[4].suit} 翻开 · 准备摊牌`,
+        log: [{ name: "系统", text: `河牌 ${current.board[4].rank}${current.board[4].suit}`, time: "刚刚", type: "deal" }, ...current.log].slice(0, 6),
+      }));
+    }, riverDelay);
+    schedule(() => setGame((current) => ({ ...current, phase: "showdown", prompt: "正在比较所有未弃牌玩家的最大五张牌…" })), riverDelay + 1200);
+    schedule(() => setGame((current) => resolveShowdown(current)), riverDelay + 2200);
+    schedule(() => dealNextHand(), riverDelay + 6600);
+  };
+
+  useEffect(() => {
+    const heroCanAct = Boolean(game.hands.hero) && game.stacks.hero > 0;
+    if (game.phase === "betting" && !heroCanAct) {
+      const timer = window.setTimeout(() => beginOpponentSequence(game.hands.hero ? "前注全下" : "旁观", 0, !game.hands.hero), 800);
+      actionTimers.current.push(timer);
+    }
+  // Each new hand should auto-run only when the user no longer has chips.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.handNumber]);
+
+  useEffect(() => {
+    setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, game.bigBlind * 3)));
+  }, [game.handNumber, game.bigBlind, game.callAmount, game.stacks.hero]);
+
+  const restartMatch = () => {
+    actionTimers.current.forEach((timer) => window.clearTimeout(timer));
+    actionTimers.current = [];
+    setShowRaise(false);
+    setRaiseAmount(120);
+    setGame(createHand(initialStacks, 1));
+  };
+
+  const heroCards = game.hands.hero ?? [];
+  const heroBest = heroCards.length ? bestHand([...heroCards, ...game.board.slice(0, game.visibleBoard)]) : { score: [0], label: "旁观中" };
+  const heroCallAmount = Math.min(game.callAmount, game.stacks.hero);
+  const aliveCount = playerIds.filter((id) => game.stacks[id] > 0 || Boolean(game.hands[id])).length;
+  const revealCards = game.phase === "showdown" || game.phase === "payout" || game.phase === "gameover";
+  const isResolving = game.phase !== "betting";
 
   return (
     <main className="app-shell">
@@ -167,44 +467,52 @@ export default function Home() {
       {view === "table" ? (
         <section className="game-layout">
           <aside className="left-panel panel">
-            <p className="eyebrow">现金桌 · NLH</p>
-            <h1>午夜河牌</h1>
-            <div className="room-meta"><span>6 人桌</span><span>¥10 / ¥20</span></div>
+            <p className="eyebrow">锦标赛 · SIT &amp; GO</p>
+            <h1>赢家通吃</h1>
+            <div className="room-meta"><span>{aliveCount} 人存活</span><span>¥{game.bigBlind / 2} / ¥{game.bigBlind}</span></div>
             <div className="divider" />
-            <p className="label">本桌统计</p>
+            <p className="label">赛事进度</p>
             <div className="stat-grid">
-              <div><strong>42</strong><span>手牌</span></div>
-              <div><strong className="gain">+1,680</strong><span>盈亏</span></div>
+              <div><strong>{game.handNumber}</strong><span>当前手牌</span></div>
+              <div><strong className="gain">{aliveCount} / 6</strong><span>剩余玩家</span></div>
             </div>
             <div className="session-progress">
-              <span><b>VPIP</b><em>28%</em></span>
-              <div><i style={{ width: "28%" }} /></div>
-              <span><b>PFR</b><em>19%</em></span>
-              <div><i style={{ width: "19%" }} /></div>
+              <span><b>盲注级别</b><em>¥{game.bigBlind / 2} / ¥{game.bigBlind}</em></span>
+              <div><i style={{ width: `${Math.min(100, 18 + game.handNumber * 4)}%` }} /></div>
+              <span><b>总筹码</b><em>¥12,000</em></span>
+              <div><i style={{ width: "100%" }} /></div>
             </div>
             <div className="tip-card">
-              <span>牌桌提示</span>
-              <p>你在按钮位，当前拥有位置优势。</p>
+              <span>赛事规则</span>
+              <p>每 4 手盲注翻倍。淘汰所有对手、赢得全部 ¥12,000 筹码即可夺冠。</p>
             </div>
-            <button className="leave-button" onClick={() => flash("已为你保留座位 30 秒")}>暂离牌桌</button>
+            <button className="leave-button" onClick={() => flash("每手随机洗牌，摊牌后自动结算并开启下一手")}>查看赛制说明</button>
           </aside>
 
           <section className="table-stage" aria-label="德州扑克牌桌">
-            <div className="hand-code">#829104 <span>·</span> 第 42 手</div>
+            <div className="hand-code">#{game.handCode} <span>·</span> 第 {game.handNumber} 手 · 随机洗牌</div>
             <div className="table-light" />
             <div className="poker-table">
               <div className="felt-ring" />
               <span className="watermark">RIVER</span>
               {players.map((player) => {
-                const action = playerActions[player.id];
-                const isActing = actingPlayer === player.id;
+                const action = game.actions[player.id];
+                const isActing = game.actingPlayer === player.id;
+                const wonHand = Boolean(game.result?.winnerIds.includes(player.id));
+                const isOut = !game.hands[player.id];
                 return (
-                <div className={`${player.className} ${isActing ? "is-active" : ""} ${action.folded ? "is-folded" : ""}`} key={player.name}>
-                  <div className="opponent-cards" aria-label={`${player.name} 的两张未公开手牌`}>
-                    <span /><span />
-                  </div>
+                <div className={`${player.className} ${isActing ? "is-active" : ""} ${action.folded ? "is-folded" : ""} ${wonHand ? "is-winner" : ""} ${isOut ? "is-out" : ""}`} key={player.name}>
+                  {game.hands[player.id] && (
+                    <div className={`opponent-cards ${revealCards && !game.folded[player.id] ? "revealed" : ""}`} aria-label={`${player.name} 的两张${revealCards ? "摊牌" : "未公开"}手牌`}>
+                      {game.hands[player.id].map((card, cardIndex) => (
+                        <span className={card.suit === "♥" || card.suit === "♦" ? "red" : ""} key={`${card.rank}-${card.suit}-${cardIndex}`}>
+                          {revealCards && !game.folded[player.id] && <><b>{card.rank}</b><small>{card.suit}</small></>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="mini-avatar">{player.name.slice(0, 1)}</div>
-                  <div className="seat-copy"><b>{player.name}</b><span>¥{player.stack}</span></div>
+                  <div className="seat-copy"><b>{player.name}</b><span>¥{game.stacks[player.id].toLocaleString()}</span></div>
                   <div className={`action-bubble ${action.type}`}>
                     {action.type === "thinking" && <span className="thinking-dots"><i /><i /><i /></span>}
                     {action.label}
@@ -217,43 +525,69 @@ export default function Home() {
                   )}
                 </div>
               )})}
-              <div className="pot"><span>底池</span><strong>¥ {handPot.toLocaleString()}</strong></div>
+              <div className="pot"><span>{game.phase === "payout" ? "已派奖" : "底池"}</span><strong>¥ {(game.phase === "payout" ? game.lastPot : game.pot).toLocaleString()}</strong></div>
               <div className="community-cards" aria-label="公共牌">
-                <div><b>10</b><span>♠</span></div>
-                <div className="red"><b>J</b><span>♥</span></div>
-                <div><b>Q</b><span>♣</span></div>
-                <div className="red"><b>4</b><span>♦</span></div>
-                <div className="card-back">?</div>
+                {game.board.map((card, index) => index < game.visibleBoard ? (
+                  <div className={card.suit === "♥" || card.suit === "♦" ? "red card-reveal" : "card-reveal"} key={`${card.rank}-${card.suit}-${index}`}>
+                    <b>{card.rank}</b><span>{card.suit}</span>
+                  </div>
+                ) : <div className="card-back" key={`hidden-${index}`}>?</div>)}
               </div>
               <div className="dealer-chip">D</div>
-              <div className="hero-seat">
-                <div className="hole-cards">
-                  <div className="red"><b>A</b><span>♥</span></div>
-                  <div><b>K</b><span>♠</span></div>
-                </div>
-                <div className="hero-info"><b>我</b><span>¥12,840</span></div>
-                {heroAction && <div className="hero-action">{heroAction}</div>}
+              <div className={`hero-seat ${game.actingPlayer === "hero" ? "is-active" : ""} ${game.result?.winnerIds.includes("hero") ? "is-winner" : ""}`}>
+                {heroCards.length > 0 ? (
+                  <div className="hole-cards">
+                    {heroCards.map((card, index) => <div className={card.suit === "♥" || card.suit === "♦" ? "red" : ""} key={`${card.rank}-${card.suit}-${index}`}><b>{card.rank}</b><span>{card.suit}</span></div>)}
+                  </div>
+                ) : <div className="spectator-cards">旁观</div>}
+                <div className="hero-info"><b>我</b><span>¥{game.stacks.hero.toLocaleString()}</span></div>
+                {game.heroAction && <div className="hero-action">{game.heroAction}</div>}
               </div>
+              {game.result && game.phase === "payout" && (
+                <div className="showdown-banner">
+                  <small>SHOWDOWN · 自动结算</small>
+                  <strong>{game.result.winnerIds.map((id) => tableNames[id]).join("、")} 获胜</strong>
+                  <span>{game.result.label} · +¥{game.result.amount.toLocaleString()}</span>
+                  <i>下一手即将自动开始</i>
+                </div>
+              )}
+              {game.phase === "gameover" && game.championId && (
+                <div className="showdown-banner champion-banner">
+                  <small>TOURNAMENT CHAMPION</small>
+                  <strong>{tableNames[game.championId]} 赢得整场比赛</strong>
+                  <span>独揽全部 ¥12,000 筹码</span>
+                  <i>点击下方按钮可重新开赛</i>
+                </div>
+              )}
             </div>
 
-            <div className="action-bar">
-              <div className="action-copy"><span>{isResolving ? "对手行动中" : "轮到你行动"} <i /></span><b>{actionPrompt}</b></div>
-              <div className="action-buttons">
-                <button className="ghost" disabled={isResolving} onClick={() => beginOpponentSequence("弃牌", 0)}>弃牌</button>
-                <button className="ghost" disabled={isResolving} onClick={() => flash("当前有人下注，本轮不可过牌")}>过牌</button>
-                <button className="primary" disabled={isResolving} onClick={() => beginOpponentSequence(`跟注 ¥${callAmount}`, callAmount)}>跟注 · ¥{callAmount}</button>
-                <button className={showRaise ? "raise selected" : "raise"} disabled={isResolving} onClick={() => setShowRaise(!showRaise)}>加注</button>
+            <div className={`action-bar phase-${game.phase}`}>
+              <div className="action-copy">
+                <span>{game.phase === "gameover" ? "赛事结束" : game.phase === "payout" ? "本手已结算" : isResolving ? "牌局自动进行中" : "轮到你行动"} <i /></span>
+                <b>{game.prompt}</b>
               </div>
-              {showRaise && (
+              {game.phase === "gameover" ? (
+                <div className="action-buttons"><button className="primary" onClick={restartMatch}>重新开始锦标赛</button></div>
+              ) : game.phase === "payout" ? (
+                <div className="action-buttons"><button className="primary" onClick={dealNextHand}>立即下一手</button></div>
+              ) : (
+                <div className="action-buttons">
+                  <button className="ghost" disabled={isResolving || !heroCards.length || game.stacks.hero === 0} onClick={() => beginOpponentSequence("弃牌", 0, true)}>弃牌</button>
+                  <button className="ghost" disabled={isResolving} onClick={() => flash("当前有 ¥" + heroCallAmount + " 需要跟注")}>过牌</button>
+                  <button className="primary" disabled={isResolving || !heroCards.length || game.stacks.hero === 0} onClick={() => beginOpponentSequence(heroCallAmount === game.stacks.hero ? `全下 ¥${heroCallAmount}` : `跟注 ¥${heroCallAmount}`, heroCallAmount)}>{heroCallAmount === game.stacks.hero ? "全下" : "跟注"} · ¥{heroCallAmount}</button>
+                  <button className={showRaise ? "raise selected" : "raise"} disabled={isResolving || game.stacks.hero <= heroCallAmount} onClick={() => setShowRaise(!showRaise)}>加注</button>
+                </div>
+              )}
+              {showRaise && game.phase === "betting" && (
                 <div className="raise-tray">
                   <div className="raise-head"><span>加注金额</span><b>¥{raiseAmount.toLocaleString()}</b></div>
-                  <input aria-label="选择加注金额" type="range" min="640" max="4000" step="20" value={raiseAmount} onChange={(event) => setRaiseAmount(Number(event.target.value))} />
+                  <input aria-label="选择加注金额" type="range" min={Math.min(game.stacks.hero, game.callAmount * 2)} max={game.stacks.hero} step={Math.max(10, game.bigBlind / 2)} value={Math.min(game.stacks.hero, Math.max(raiseAmount, Math.min(game.stacks.hero, game.callAmount * 2)))} onChange={(event) => setRaiseAmount(Number(event.target.value))} />
                   <div className="quick-bets">
-                    <button onClick={() => setRaiseAmount(640)}>最小</button>
-                    <button onClick={() => setRaiseAmount(930)}>3/4 底池</button>
-                    <button onClick={() => setRaiseAmount(1240)}>满池</button>
-                    <button onClick={() => setRaiseAmount(4000)}>全下</button>
-                    <button className="confirm-bet" onClick={() => beginOpponentSequence(`加注至 ¥${raiseAmount.toLocaleString()}`, raiseAmount)}>确认加注</button>
+                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, game.callAmount * 2))}>最小</button>
+                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, Math.floor(game.pot * .75))))}>3/4 底池</button>
+                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, game.pot)))}>满池</button>
+                    <button onClick={() => setRaiseAmount(game.stacks.hero)}>全下</button>
+                    <button className="confirm-bet" onClick={() => { const amount = Math.min(raiseAmount, game.stacks.hero); beginOpponentSequence(amount === game.stacks.hero ? `全下 ¥${amount}` : `加注至 ¥${amount}`, amount); }}>确认加注</button>
                   </div>
                 </div>
               )}
@@ -262,20 +596,20 @@ export default function Home() {
 
           <aside className="right-panel panel">
             <p className="eyebrow">本手牌</p>
-            <h2>顺子听牌</h2>
-            <div className="equity"><div><span style={{ width: "68%" }} /></div><b>68%</b></div>
-            <p className="muted">预计胜率 · 还有 1 张牌</p>
+            <h2>{heroBest.label}</h2>
+            <div className="equity"><div><span style={{ width: `${Math.min(94, 24 + heroBest.score[0] * 9 + (heroCards[0]?.value ?? 0))}%` }} /></div><b>{heroCards.length ? `${Math.min(94, 24 + heroBest.score[0] * 9 + (heroCards[0]?.value ?? 0))}%` : "--"}</b></div>
+            <p className="muted">动态牌力估算 · {game.visibleBoard === 4 ? "等待河牌" : "五张公共牌已发完"}</p>
             <div className="hand-outs">
-              <span><b>8</b><small>有效补牌</small></span>
-              <span><b>2.1 : 1</b><small>底池赔率</small></span>
+              <span><b>{aliveCount}</b><small>存活玩家</small></span>
+              <span><b>¥{game.bigBlind}</b><small>当前大盲</small></span>
             </div>
             <div className="divider" />
             <div className="activity-title"><span>牌桌动态</span><button onClick={() => openRecords("games")}>全部记录</button></div>
             <ul className="activity-list">
-              {actionLog.map((item, index) => (
+              {game.log.map((item, index) => (
                 <li className={index === 0 ? "latest-action" : ""} key={`${item.name}-${item.text}-${index}`}>
-                  <span className={`activity-icon ${item.type === "fold" ? "muted-icon" : ""} ${item.type === "raise" || item.type === "deal" ? "gold-icon" : ""}`}>
-                    {item.type === "fold" ? "×" : item.type === "raise" ? "↑" : item.type === "deal" ? "D" : "●"}
+                  <span className={`activity-icon ${item.type === "fold" ? "muted-icon" : ""} ${item.type === "raise" || item.type === "deal" || item.type === "win" ? "gold-icon" : ""}`}>
+                    {item.type === "fold" ? "×" : item.type === "raise" ? "↑" : item.type === "deal" ? "D" : item.type === "win" ? "★" : "●"}
                   </span>
                   <p><b>{item.name}</b> {item.text}<small>{item.time}</small></p>
                 </li>

@@ -21,7 +21,8 @@ test("server-renders the River poker experience", async () => {
 
   const html = await response.text();
   assert.match(html, /RIVER/);
-  assert.match(html, /午夜河牌/);
+  assert.match(html, /赢家通吃/);
+  assert.match(html, /随机洗牌/);
   assert.match(html, /打开账户记录/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/);
 });
