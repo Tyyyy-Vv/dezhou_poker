@@ -23,6 +23,10 @@ test("server-renders the River poker experience", async () => {
   assert.match(html, /RIVER/);
   assert.match(html, /赢家通吃/);
   assert.match(html, /随机洗牌/);
+  assert.match(html, /庄家 BTN/);
+  assert.match(html, /小盲 SB/);
+  assert.match(html, /大盲 BB/);
+  assert.match(html, /枪口 UTG/);
   assert.equal((html.match(/empty-card-slot/g) ?? []).length, 5);
   assert.doesNotMatch(html, /class="(?:red )?card-reveal"/);
   assert.match(html, /打开账户记录/);
@@ -38,6 +42,9 @@ test("removes starter-only assets and metadata", async () => {
 
   assert.match(page, /资金流水/);
   assert.match(page, /牌局记录/);
+  assert.match(page, /estimateHandStrength/);
+  assert.match(page, /raisesThisStreet/);
+  assert.match(page, /无人下注，可以过牌或下注/);
   assert.match(layout, /RIVER 德扑竞技/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

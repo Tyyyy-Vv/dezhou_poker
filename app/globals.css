@@ -88,6 +88,8 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .seat-copy { position: relative; z-index: 2; display: flex; flex-direction: column; }
 .seat-copy b { font-size: 10px; }
 .seat-copy span { color: var(--muted); font-size: 9px; margin-top: 2px; }
+.position-badge { position: absolute; z-index: 7; right: 8px; top: -13px; padding: 3px 6px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: #111a16; color: #9ca7a1; font-size: 6px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; box-shadow: 0 4px 10px rgba(0,0,0,.3); }
+.position-badge.button-position { border-color: rgba(218,191,119,.5); background: #292516; color: var(--gold); }
 .seat.is-active { border-color: rgba(218,191,119,.72); box-shadow: 0 0 0 2px rgba(218,191,119,.08), 0 0 24px rgba(218,191,119,.22), 0 12px 26px rgba(0,0,0,.38); }
 .seat.is-active .mini-avatar:after { content: ""; position: absolute; inset: -5px; border: 1px solid var(--gold); border-radius: 50%; border-left-color: transparent; animation: turn-ring 1.25s linear infinite; }
 .seat.is-folded .mini-avatar, .seat.is-folded .seat-copy, .seat.is-folded .opponent-cards { filter: grayscale(1); opacity: .48; }
@@ -132,8 +134,8 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .seat.right .wager-marker { right: calc(100% + 30px); top: 50%; transform: translateY(-50%); }
 .seat.bottom-left .wager-marker { right: -8px; bottom: calc(100% + 18px); }
 .seat.bottom-right .wager-marker { left: -8px; bottom: calc(100% + 18px); }
-.dealer-chip { position: absolute; left: 64%; bottom: 18%; width: 23px; height: 23px; display: grid; place-items: center; background: #e4e1d7; color: #1c2421; border-radius: 50%; font-size: 9px; font-weight: bold; }
 .hero-seat { position: absolute; left: 50%; bottom: 0; transform: translate(-50%,50%); display: flex; align-items: center; gap: 12px; z-index: 3; }
+.hero-seat .hero-position { top: -19px; right: 2px; }
 .hole-cards { display: flex; }
 .hole-cards > div { width: 43px; height: 61px; margin-left: -10px; transform: rotate(-4deg); }
 .hole-cards > div + div { transform: rotate(4deg) translateY(2px); }

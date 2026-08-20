@@ -31,6 +31,14 @@ const tableNames: Record<string, string> = {
   lynn: "Lynn",
 };
 
+const aiProfiles: Record<string, { aggression: number; looseness: number }> = {
+  azhe: { aggression: .58, looseness: .48 },
+  mia: { aggression: .78, looseness: .62 },
+  oldfox: { aggression: .38, looseness: .3 },
+  kai: { aggression: .68, looseness: .54 },
+  lynn: { aggression: .52, looseness: .44 },
+};
+
 const playerIds = ["hero", "azhe", "mia", "oldfox", "kai", "lynn"];
 const initialStacks: Record<string, number> = Object.fromEntries(playerIds.map((id) => [id, 2000]));
 const suits = ["♠", "♥", "♦", "♣"] as const;
@@ -43,6 +51,7 @@ const ranks = [
 
 type Card = { rank: string; value: number; suit: typeof suits[number] };
 type Street = "preflop" | "flop" | "turn" | "river";
+type PositionCode = "BTN" | "BTN/SB" | "SB" | "BB" | "UTG" | "HJ" | "CO";
 type GamePhase = "betting" | "opponents" | "dealing" | "showdown" | "payout" | "gameover";
 type ActionLogItem = { name: string; text: string; time: string; type: string };
 type HandResult = { winnerIds: string[]; label: string; amount: number; showdown: boolean };
@@ -51,6 +60,10 @@ type GameState = {
   handNumber: number;
   handCode: number;
   bigBlind: number;
+  positions: Partial<Record<string, PositionCode>>;
+  dealerId: string;
+  smallBlindId: string;
+  bigBlindId: string;
   street: Street;
   stacks: Record<string, number>;
   hands: Record<string, Card[]>;
@@ -62,6 +75,7 @@ type GameState = {
   pot: number;
   lastPot: number;
   callAmount: number;
+  raisesThisStreet: number;
   phase: GamePhase;
   prompt: string;
   heroAction: string;
@@ -145,6 +159,77 @@ const bestHand = (cards: Card[]) => {
   return best;
 };
 
+const positionLabels: Record<PositionCode, string> = {
+  BTN: "庄家 BTN",
+  "BTN/SB": "庄家 / 小盲",
+  SB: "小盲 SB",
+  BB: "大盲 BB",
+  UTG: "枪口 UTG",
+  HJ: "劫持 HJ",
+  CO: "关煞 CO",
+};
+
+const buildPositions = (activeIds: string[], handNumber: number) => {
+  const buttonIndex = (handNumber - 1) % activeIds.length;
+  const clockwise = [...activeIds.slice(buttonIndex), ...activeIds.slice(0, buttonIndex)];
+  const labelsByCount: Record<number, PositionCode[]> = {
+    2: ["BTN/SB", "BB"],
+    3: ["BTN", "SB", "BB"],
+    4: ["BTN", "SB", "BB", "CO"],
+    5: ["BTN", "SB", "BB", "UTG", "CO"],
+    6: ["BTN", "SB", "BB", "UTG", "HJ", "CO"],
+  };
+  const labels = labelsByCount[activeIds.length] ?? ["BTN"];
+  const positions: Partial<Record<string, PositionCode>> = {};
+  clockwise.forEach((id, index) => { positions[id] = labels[index]; });
+  const headsUp = activeIds.length === 2;
+  return {
+    positions,
+    dealerId: clockwise[0],
+    smallBlindId: headsUp ? clockwise[0] : clockwise[1],
+    bigBlindId: headsUp ? clockwise[1] : clockwise[2],
+  };
+};
+
+const clockwiseAfter = (anchorId: string, eligibleIds: string[]) => {
+  const anchorIndex = playerIds.indexOf(anchorId);
+  return Array.from({ length: playerIds.length }, (_, offset) => playerIds[(anchorIndex + offset + 1) % playerIds.length])
+    .filter((id) => eligibleIds.includes(id));
+};
+
+const actionOrderForStreet = (state: GameState) => {
+  const activeIds = playerIds.filter((id) => state.hands[id] && !state.folded[id]);
+  return clockwiseAfter(state.street === "preflop" ? state.bigBlindId : state.dealerId, activeIds);
+};
+
+const preflopStrength = (cards: Card[]) => {
+  const [first, second] = [...cards].sort((left, right) => right.value - left.value);
+  if (first.value === second.value) return Math.min(.99, .56 + (first.value - 2) * .035);
+  let strength = first.value / 14 * .43 + second.value / 14 * .2;
+  if (first.suit === second.suit) strength += .07;
+  const gap = first.value - second.value;
+  if (gap === 1) strength += .06;
+  else if (gap === 2) strength += .035;
+  if (second.value >= 10) strength += .1;
+  if (first.value === 14) strength += .04;
+  return Math.max(.18, Math.min(.96, strength));
+};
+
+const estimateHandStrength = (state: GameState, id: string) => {
+  const holeCards = state.hands[id];
+  if (!holeCards) return 0;
+  if (state.street === "preflop") return preflopStrength(holeCards);
+  const visibleCards = [...holeCards, ...state.board.slice(0, state.visibleBoard)];
+  const result = bestHand(visibleCards);
+  const categoryBase = [.22, .46, .66, .76, .84, .89, .95, .985, 1][result.score[0]] ?? .2;
+  const kicker = (result.score[1] ?? 0) / 14 * .05;
+  const suitCounts = suits.map((suit) => visibleCards.filter((card) => card.suit === suit).length);
+  const flushDraw = Math.max(...suitCounts) === 4 ? .07 : 0;
+  const uniqueValues = [...new Set(visibleCards.map((card) => card.value).concat(visibleCards.some((card) => card.value === 14) ? [1] : []))].sort((a, b) => a - b);
+  const straightDraw = uniqueValues.some((value, index) => uniqueValues.slice(index).some((high) => high - value <= 4 && uniqueValues.filter((candidate) => candidate >= value && candidate <= value + 4).length >= 4)) ? .045 : 0;
+  return Math.min(1, categoryBase + kicker + flushDraw + straightDraw);
+};
+
 const createHand = (previousStacks: Record<string, number>, handNumber: number, seed?: number): GameState => {
   const random = seed === undefined ? Math.random : seededRandom(seed);
   const activeIds = playerIds.filter((id) => previousStacks[id] > 0);
@@ -154,7 +239,8 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
   for (let round = 0; round < 2; round += 1) activeIds.forEach((id) => hands[id].push(deck.pop()!));
   const board = Array.from({ length: 5 }, () => deck.pop()!);
   const bigBlind = Math.min(640, 40 * 2 ** Math.floor((handNumber - 1) / 4));
-  const ante = Math.max(10, Math.floor(bigBlind / 2));
+  const smallBlind = bigBlind / 2;
+  const { positions, dealerId, smallBlindId, bigBlindId } = buildPositions(activeIds, handNumber);
   const stacks = { ...previousStacks };
   const actions: Record<string, PlayerAction> = {};
   const folded: Record<string, boolean> = {};
@@ -166,21 +252,34 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
       actions[id] = { label: "已淘汰", type: "out", committed: 0, folded: true };
       return;
     }
-    const paid = Math.min(ante, stacks[id]);
+    folded[id] = false;
+    actions[id] = { label: "等待行动", type: "waiting", committed: 0 };
+  });
+
+  const postBlind = (id: string, amount: number, label: string) => {
+    const paid = Math.min(amount, stacks[id]);
     stacks[id] -= paid;
     pot += paid;
-    folded[id] = false;
-    actions[id] = stacks[id] === 0
-      ? { label: `前注全下 ¥${paid}`, type: "allin", committed: paid }
-      : { label: `前注 ¥${paid}`, type: "waiting", committed: paid };
-  });
+    actions[id] = {
+      label: stacks[id] === 0 ? `${label}全下 ¥${paid}` : `${label} ¥${paid}`,
+      type: stacks[id] === 0 ? "allin" : "waiting",
+      committed: paid,
+    };
+  };
+  postBlind(smallBlindId, smallBlind, "小盲");
+  postBlind(bigBlindId, bigBlind, "大盲");
 
   const heroCanAct = Boolean(hands.hero) && stacks.hero > 0;
   const callAmount = bigBlind;
+  const heroToCall = Math.min(stacks.hero, Math.max(0, callAmount - (actions.hero?.committed ?? 0)));
   return {
     handNumber,
     handCode: 820000 + Math.floor(random() * 9999),
     bigBlind,
+    positions,
+    dealerId,
+    smallBlindId,
+    bigBlindId,
     street: "preflop",
     stacks,
     hands,
@@ -192,10 +291,15 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
     pot,
     lastPot: 0,
     callAmount,
+    raisesThisStreet: 0,
     phase: "betting",
-    prompt: heroCanAct ? `翻牌前 · 跟注 ¥${Math.min(callAmount, stacks.hero)}` : "你已淘汰 · 自动观战",
-    heroAction: stacks.hero === 0 && hands.hero ? "前注全下" : "",
-    log: [{ name: "系统", text: `第 ${handNumber} 手牌已发出`, time: "刚刚", type: "deal" }],
+    prompt: heroCanAct ? `翻牌前 · ${positionLabels[positions.hero!]} · ${heroToCall > 0 ? `需跟注 ¥${heroToCall}` : "可过牌"}` : "你已淘汰 · 自动观战",
+    heroAction: actions.hero?.committed > 0 ? actions.hero.label : "",
+    log: [
+      { name: tableNames[bigBlindId], text: `大盲 ¥${Math.min(bigBlind, previousStacks[bigBlindId])}`, time: "刚刚", type: "call" },
+      { name: tableNames[smallBlindId], text: `小盲 ¥${Math.min(smallBlind, previousStacks[smallBlindId])}`, time: "刚刚", type: "call" },
+      { name: "系统", text: `第 ${handNumber} 手牌已发出 · ${tableNames[dealerId]}在庄位`, time: "刚刚", type: "deal" },
+    ],
     result: null,
     championId: null,
   };
@@ -227,7 +331,7 @@ const dealNextStreet = (current: GameState): GameState => {
 };
 
 const prepareStreetBetting = (current: GameState): GameState => {
-  const callAmount = current.street === "turn" || current.street === "river" ? current.bigBlind * 2 : current.bigBlind;
+  const callAmount = 0;
   const actions: Record<string, PlayerAction> = {};
   playerIds.forEach((id) => {
     if (!current.hands[id]) actions[id] = { label: "已淘汰", type: "out", committed: 0, folded: true };
@@ -241,10 +345,11 @@ const prepareStreetBetting = (current: GameState): GameState => {
     ...current,
     actions,
     callAmount,
+    raisesThisStreet: 0,
     phase: "betting",
     actingPlayer: heroCanAct ? "hero" : null,
     heroAction: current.folded.hero ? "本手已弃牌" : current.stacks.hero === 0 && current.hands.hero ? "全下等待" : "",
-    prompt: heroCanAct ? `${streetLabels[current.street]} · 跟注 ¥${Math.min(callAmount, current.stacks.hero)}` : `${streetLabels[current.street]} · 自动进行中`,
+    prompt: heroCanAct ? `${streetLabels[current.street]} · 无人下注，可以过牌或下注` : `${streetLabels[current.street]} · 自动进行中`,
   };
 };
 
@@ -368,16 +473,29 @@ export default function Home() {
   const applyOpponentDecision = (id: string) => {
     setGame((current) => {
       if (!current.hands[id] || current.folded[id] || current.stacks[id] === 0) return { ...current, actingPlayer: null };
-      const handStrength = bestHand([...current.hands[id], ...current.board.slice(0, current.visibleBoard)]).score[0];
-      const holePair = current.hands[id][0].value === current.hands[id][1].value;
+      const profile = aiProfiles[id] ?? { aggression: .5, looseness: .5 };
+      const position = current.positions[id] ?? "UTG";
+      const positionBonus: Partial<Record<PositionCode, number>> = { BTN: .08, "BTN/SB": .05, CO: .065, HJ: .025, UTG: -.045, SB: -.01, BB: 0 };
+      const handStrength = estimateHandStrength(current, id);
+      const committed = current.actions[id]?.committed ?? 0;
+      const toCall = Math.min(current.stacks[id], Math.max(0, current.callAmount - committed));
+      const potOdds = toCall / Math.max(1, current.pot + toCall);
+      const decisionScore = handStrength + (positionBonus[position] ?? 0) + (profile.looseness - .5) * .11 + (Math.random() - .5) * .12;
       const contenders = playerIds.filter((playerId) => current.hands[playerId] && !current.folded[playerId]);
       const mustContinue = contenders.length <= 1;
-      const foldChance = Math.max(.08, .34 - handStrength * .045 - (holePair ? .1 : 0));
-      const shouldFold = !mustContinue && Math.random() < foldChance;
+      const foldThreshold = .32 + potOdds * .52 - profile.looseness * .08;
+      const shouldFold = !mustContinue && toCall > 0 && decisionScore < foldThreshold && Math.random() < .9;
+      const latePosition = position === "BTN" || position === "BTN/SB" || position === "CO";
+      const bluffRaise = latePosition && toCall === 0 && Math.random() < .045 + profile.aggression * .07;
+      const valueThreshold = current.street === "preflop" ? .73 : .68;
+      const shouldRaise = current.raisesThisStreet < 2 && current.stacks[id] > toCall
+        && (decisionScore > valueThreshold - profile.aggression * .08 || bluffRaise);
       const stacks = { ...current.stacks };
       const folded = { ...current.folded };
       const actions = { ...current.actions };
       let pot = current.pot;
+      let callAmount = current.callAmount;
+      let raisesThisStreet = current.raisesThisStreet;
       let text = "";
       let type: ActionType = "call";
 
@@ -386,8 +504,27 @@ export default function Home() {
         text = "弃牌";
         type = "fold";
         actions[id] = { label: text, type, committed: actions[id].committed, folded: true };
+      } else if (shouldRaise) {
+        const unit = Math.max(10, current.bigBlind / 2);
+        const rawTarget = current.callAmount === 0
+          ? Math.max(current.bigBlind, current.pot * (.45 + profile.aggression * .35))
+          : Math.max(current.callAmount + current.bigBlind, current.callAmount * (2.05 + profile.aggression * .75));
+        let targetCommitment = Math.ceil(rawTarget / unit) * unit;
+        const allInPressure = current.stacks[id] <= current.pot * .9 || (handStrength > .93 && Math.random() < .22);
+        if (allInPressure) targetCommitment = committed + current.stacks[id];
+        targetCommitment = Math.min(committed + current.stacks[id], targetCommitment);
+        const contribution = Math.max(0, targetCommitment - committed);
+        stacks[id] -= contribution;
+        pot += contribution;
+        const allIn = stacks[id] === 0;
+        const isOpeningBet = current.callAmount === 0;
+        callAmount = Math.max(callAmount, targetCommitment);
+        raisesThisStreet += targetCommitment > current.callAmount ? 1 : 0;
+        text = allIn ? `全下 ¥${contribution}` : isOpeningBet ? `下注 ¥${targetCommitment}` : `加注至 ¥${targetCommitment}`;
+        type = allIn ? "allin" : "raise";
+        actions[id] = { label: text, type, committed: targetCommitment };
       } else {
-        const contribution = Math.min(current.callAmount, stacks[id]);
+        const contribution = toCall;
         stacks[id] -= contribution;
         pot += contribution;
         const allIn = stacks[id] === 0;
@@ -403,27 +540,46 @@ export default function Home() {
         actions,
         actingPlayer: null,
         pot,
-        log: [{ name: tableNames[id], text, time: "刚刚", type }, ...current.log].slice(0, 6),
+        callAmount,
+        raisesThisStreet,
+        log: [{ name: tableNames[id], text: `${positionLabels[position]} · ${text}`, time: "刚刚", type }, ...current.log].slice(0, 6),
       };
     });
   };
 
-  const beginOpponentSequence = (label: string, requestedContribution: number, foldHero = false) => {
+  const beginOpponentSequence = (requestedTarget: number, foldHero = false) => {
     if (game.phase !== "betting") return;
     actionTimers.current.forEach((timer) => window.clearTimeout(timer));
     actionTimers.current = [];
     setShowRaise(false);
-    const contribution = foldHero || !game.hands.hero ? 0 : Math.min(requestedContribution, game.stacks.hero);
-    const opponentCall = requestedContribution > game.callAmount ? requestedContribution : game.callAmount;
+    const snapshotCommitted = game.actions.hero?.committed ?? 0;
+    const snapshotTarget = foldHero ? snapshotCommitted : Math.min(snapshotCommitted + game.stacks.hero, Math.max(snapshotCommitted, requestedTarget));
+    const opponentCall = Math.max(game.callAmount, snapshotTarget);
     setGame((current) => {
+      const heroCommitted = current.actions.hero?.committed ?? 0;
+      const targetCommitment = foldHero ? heroCommitted : Math.min(heroCommitted + current.stacks.hero, Math.max(heroCommitted, requestedTarget));
+      const contribution = foldHero || !current.hands.hero ? 0 : Math.max(0, targetCommitment - heroCommitted);
       const stacks = { ...current.stacks, hero: current.stacks.hero - contribution };
       const folded = { ...current.folded, hero: foldHero || !current.hands.hero };
+      const isRaise = !foldHero && targetCommitment > current.callAmount;
+      const alreadyAllIn = !foldHero && Boolean(current.hands.hero) && current.stacks.hero === 0;
+      const allIn = !foldHero && contribution > 0 && stacks.hero === 0;
+      const label = foldHero
+        ? "弃牌"
+        : alreadyAllIn
+          ? "全下等待"
+        : allIn
+          ? `全下 ¥${contribution}`
+          : isRaise
+            ? current.callAmount === 0 ? `下注 ¥${targetCommitment}` : `加注至 ¥${targetCommitment}`
+            : contribution > 0 ? `跟注 ¥${contribution}` : "过牌";
+      const actionType: ActionType = foldHero ? "fold" : alreadyAllIn || allIn ? "allin" : isRaise ? "raise" : contribution > 0 ? "call" : "check";
       const actions = {
         ...current.actions,
         hero: {
           label,
-          type: foldHero ? "fold" : stacks.hero === 0 ? "allin" : contribution > 0 ? requestedContribution > current.callAmount ? "raise" : "call" : "waiting",
-          committed: (current.actions.hero?.committed ?? 0) + contribution,
+          type: actionType,
+          committed: heroCommitted + contribution,
           folded: foldHero,
         } as PlayerAction,
       };
@@ -434,15 +590,17 @@ export default function Home() {
         actions,
         phase: "opponents",
         actingPlayer: null,
-        callAmount: opponentCall,
+        callAmount: Math.max(current.callAmount, heroCommitted + contribution),
+        raisesThisStreet: current.raisesThisStreet + (isRaise ? 1 : 0),
         heroAction: label,
         pot: current.pot + contribution,
         prompt: "其他玩家正在依次行动…",
-        log: [{ name: "我", text: label, time: "刚刚", type: foldHero ? "fold" : "call" }, ...current.log].slice(0, 6),
+        log: [{ name: "我", text: `${current.positions.hero ? positionLabels[current.positions.hero] : ""} · ${label}`, time: "刚刚", type: actionType }, ...current.log].slice(0, 6),
       };
     });
 
-    const opponentOrder = shuffle(players.map((player) => player.id).filter((id) => game.hands[id] && !game.folded[id] && game.stacks[id] > 0));
+    const opponentOrder = actionOrderForStreet(game).filter((id) => id !== "hero" && game.hands[id] && !game.folded[id] && game.stacks[id] > 0
+      && (game.actions[id]?.type === "waiting" || (game.actions[id]?.committed ?? 0) < opponentCall));
     opponentOrder.forEach((id, index) => {
       const start = 450 + index * 1050;
       schedule(() => {
@@ -460,6 +618,15 @@ export default function Home() {
       setGame((current) => {
         const contenders = playerIds.filter((id) => current.hands[id] && !current.folded[id]);
         if (contenders.length <= 1) return resolveShowdown(current);
+        const heroCommitted = current.actions.hero?.committed ?? 0;
+        const heroOwes = Boolean(current.hands.hero) && !current.folded.hero && current.stacks.hero > 0 && heroCommitted < current.callAmount;
+        if (heroOwes) {
+          const due = Math.min(current.stacks.hero, current.callAmount - heroCommitted);
+          return { ...current, phase: "betting", actingPlayer: "hero", prompt: `对手已加注至 ¥${current.callAmount} · 还需跟注 ¥${due}` };
+        }
+        const opponentsOwe = playerIds.some((id) => id !== "hero" && current.hands[id] && !current.folded[id] && current.stacks[id] > 0
+          && (current.actions[id]?.committed ?? 0) < current.callAmount);
+        if (opponentsOwe) return { ...current, phase: "betting", actingPlayer: null, prompt: "仍有玩家需要响应当前加注…" };
         if (current.street === "river") return { ...current, phase: "showdown", actingPlayer: null, prompt: "河牌轮结束 · 正在比较所有玩家的最佳五张牌…" };
         return dealNextStreet(current);
       });
@@ -475,9 +642,9 @@ export default function Home() {
   };
 
   useEffect(() => {
-    const heroCanAct = Boolean(game.hands.hero) && game.stacks.hero > 0;
+    const heroCanAct = Boolean(game.hands.hero) && !game.folded.hero && game.stacks.hero > 0;
     if (game.phase === "betting" && !heroCanAct) {
-      const timer = window.setTimeout(() => beginOpponentSequence(game.hands.hero ? "前注全下" : "旁观", 0, !game.hands.hero), 800);
+      const timer = window.setTimeout(() => beginOpponentSequence(game.actions.hero?.committed ?? 0, Boolean(game.folded.hero || !game.hands.hero)), 800);
       actionTimers.current.push(timer);
     }
   // Each betting street should auto-run when the user has folded, is all-in, or is eliminated.
@@ -485,8 +652,11 @@ export default function Home() {
   }, [game.handNumber, game.street, game.phase]);
 
   useEffect(() => {
-    setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, game.bigBlind * 3)));
-  }, [game.handNumber, game.bigBlind, game.callAmount, game.stacks.hero]);
+    const committed = game.actions.hero?.committed ?? 0;
+    const allInTotal = committed + game.stacks.hero;
+    const minimumRaise = game.callAmount === 0 ? game.bigBlind : Math.max(game.callAmount + game.bigBlind, game.callAmount * 2);
+    setRaiseAmount(Math.min(allInTotal, Math.max(minimumRaise, game.bigBlind * 3)));
+  }, [game.handNumber, game.street, game.bigBlind, game.callAmount, game.stacks.hero, game.actions.hero?.committed]);
 
   const restartMatch = () => {
     actionTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -498,7 +668,11 @@ export default function Home() {
 
   const heroCards = game.hands.hero ?? [];
   const heroBest = heroCards.length ? bestHand([...heroCards, ...game.board.slice(0, game.visibleBoard)]) : { score: [0], label: "旁观中" };
-  const heroCallAmount = Math.min(game.callAmount, game.stacks.hero);
+  const heroCommitted = game.actions.hero?.committed ?? 0;
+  const heroCallAmount = Math.min(game.stacks.hero, Math.max(0, game.callAmount - heroCommitted));
+  const heroAllInTotal = heroCommitted + game.stacks.hero;
+  const minimumRaise = Math.min(heroAllInTotal, game.callAmount === 0 ? game.bigBlind : Math.max(game.callAmount + game.bigBlind, game.callAmount * 2));
+  const canHeroAct = game.phase === "betting" && heroCards.length > 0 && !game.folded.hero && game.stacks.hero > 0;
   const aliveCount = playerIds.filter((id) => game.stacks[id] > 0 || Boolean(game.hands[id])).length;
   const revealCards = game.phase === "showdown" || ((game.phase === "payout" || game.phase === "gameover") && Boolean(game.result?.showdown));
   const isResolving = game.phase !== "betting";
@@ -528,7 +702,7 @@ export default function Home() {
           <aside className="left-panel panel">
             <p className="eyebrow">锦标赛 · SIT &amp; GO</p>
             <h1>赢家通吃</h1>
-            <div className="room-meta"><span>{aliveCount} 人存活</span><span>¥{game.bigBlind / 2} / ¥{game.bigBlind}</span></div>
+            <div className="room-meta"><span>{aliveCount} 人存活</span><span>¥{game.bigBlind / 2} / ¥{game.bigBlind}</span><span>{tableNames[game.dealerId]} · 庄位</span></div>
             <div className="divider" />
             <p className="label">赛事进度</p>
             <div className="stat-grid">
@@ -543,7 +717,7 @@ export default function Home() {
             </div>
             <div className="tip-card">
               <span>赛事规则</span>
-              <p>每 4 手盲注翻倍。淘汰所有对手、赢得全部 ¥12,000 筹码即可夺冠。</p>
+              <p>庄位、大小盲与枪口位每手顺时针轮换。对手会结合底牌、公共牌、位置、底池赔率和下注压力决策。</p>
             </div>
             <button className="leave-button" onClick={() => flash("每手随机洗牌，摊牌后自动结算并开启下一手")}>查看赛制说明</button>
           </aside>
@@ -557,10 +731,12 @@ export default function Home() {
               {players.map((player) => {
                 const action = game.actions[player.id];
                 const isActing = game.actingPlayer === player.id;
-                const wonHand = Boolean(game.result?.winnerIds.includes(player.id));
-                const isOut = !game.hands[player.id];
-                return (
-                <div className={`${player.className} ${isActing ? "is-active" : ""} ${action.folded ? "is-folded" : ""} ${wonHand ? "is-winner" : ""} ${isOut ? "is-out" : ""}`} key={player.name}>
+                 const wonHand = Boolean(game.result?.winnerIds.includes(player.id));
+                 const isOut = !game.hands[player.id];
+                 const position = game.positions[player.id];
+                 return (
+                 <div className={`${player.className} ${isActing ? "is-active" : ""} ${action.folded ? "is-folded" : ""} ${wonHand ? "is-winner" : ""} ${isOut ? "is-out" : ""}`} key={player.name}>
+                   {position && <div className={`position-badge ${position.includes("BTN") ? "button-position" : ""}`}>{positionLabels[position]}</div>}
                   {game.hands[player.id] && (
                     <div className={`opponent-cards ${revealCards && !game.folded[player.id] ? "revealed" : ""}`} aria-label={`${player.name} 的两张${revealCards ? "摊牌" : "未公开"}手牌`}>
                       {game.hands[player.id].map((card, cardIndex) => (
@@ -592,8 +768,8 @@ export default function Home() {
                   </div>
                 ) : <div className="empty-card-slot" aria-hidden="true" key={`hidden-${index}`} />)}
               </div>
-              <div className="dealer-chip">D</div>
               <div className={`hero-seat ${game.actingPlayer === "hero" ? "is-active" : ""} ${game.result?.winnerIds.includes("hero") ? "is-winner" : ""}`}>
+                {game.positions.hero && <div className={`position-badge hero-position ${game.positions.hero.includes("BTN") ? "button-position" : ""}`}>{positionLabels[game.positions.hero]}</div>}
                 {heroCards.length > 0 ? (
                   <div className="hole-cards">
                     {heroCards.map((card, index) => <div className={card.suit === "♥" || card.suit === "♦" ? "red" : ""} key={`${card.rank}-${card.suit}-${index}`}><b>{card.rank}</b><span>{card.suit}</span></div>)}
@@ -631,22 +807,22 @@ export default function Home() {
                 <div className="action-buttons"><button className="primary" onClick={dealNextHand}>立即下一手</button></div>
               ) : (
                 <div className="action-buttons">
-                  <button className="ghost" disabled={isResolving || !heroCards.length || game.stacks.hero === 0} onClick={() => beginOpponentSequence("弃牌", 0, true)}>弃牌</button>
-                  <button className="ghost" disabled={isResolving} onClick={() => flash("当前有 ¥" + heroCallAmount + " 需要跟注")}>过牌</button>
-                  <button className="primary" disabled={isResolving || !heroCards.length || game.stacks.hero === 0} onClick={() => beginOpponentSequence(heroCallAmount === game.stacks.hero ? `全下 ¥${heroCallAmount}` : `跟注 ¥${heroCallAmount}`, heroCallAmount)}>{heroCallAmount === game.stacks.hero ? "全下" : "跟注"} · ¥{heroCallAmount}</button>
-                  <button className={showRaise ? "raise selected" : "raise"} disabled={isResolving || game.stacks.hero <= heroCallAmount} onClick={() => setShowRaise(!showRaise)}>加注</button>
+                  <button className="ghost" disabled={!canHeroAct} onClick={() => beginOpponentSequence(heroCommitted, true)}>弃牌</button>
+                  <button className="ghost" disabled={!canHeroAct || heroCallAmount > 0} onClick={() => beginOpponentSequence(heroCommitted)}>过牌</button>
+                  <button className="primary" disabled={!canHeroAct || heroCallAmount === 0} onClick={() => beginOpponentSequence(game.callAmount)}>{heroCallAmount === game.stacks.hero ? "全下" : "跟注"} · ¥{heroCallAmount}</button>
+                  <button className={showRaise ? "raise selected" : "raise"} disabled={!canHeroAct || heroAllInTotal <= game.callAmount} onClick={() => setShowRaise(!showRaise)}>{game.callAmount === 0 ? "下注" : "加注"}</button>
                 </div>
               )}
               {showRaise && game.phase === "betting" && (
                 <div className="raise-tray">
                   <div className="raise-head"><span>加注金额</span><b>¥{raiseAmount.toLocaleString()}</b></div>
-                  <input aria-label="选择加注金额" type="range" min={Math.min(game.stacks.hero, game.callAmount * 2)} max={game.stacks.hero} step={Math.max(10, game.bigBlind / 2)} value={Math.min(game.stacks.hero, Math.max(raiseAmount, Math.min(game.stacks.hero, game.callAmount * 2)))} onChange={(event) => setRaiseAmount(Number(event.target.value))} />
+                  <input aria-label="选择加注金额" type="range" min={minimumRaise} max={heroAllInTotal} step={Math.max(10, game.bigBlind / 2)} value={Math.min(heroAllInTotal, Math.max(raiseAmount, minimumRaise))} onChange={(event) => setRaiseAmount(Number(event.target.value))} />
                   <div className="quick-bets">
-                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, game.callAmount * 2))}>最小</button>
-                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, Math.floor(game.pot * .75))))}>3/4 底池</button>
-                    <button onClick={() => setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, game.pot)))}>满池</button>
-                    <button onClick={() => setRaiseAmount(game.stacks.hero)}>全下</button>
-                    <button className="confirm-bet" onClick={() => { const amount = Math.min(raiseAmount, game.stacks.hero); beginOpponentSequence(amount === game.stacks.hero ? `全下 ¥${amount}` : `加注至 ¥${amount}`, amount); }}>确认加注</button>
+                    <button onClick={() => setRaiseAmount(minimumRaise)}>最小</button>
+                    <button onClick={() => setRaiseAmount(Math.min(heroAllInTotal, Math.max(minimumRaise, game.callAmount + Math.floor(game.pot * .75))))}>3/4 底池</button>
+                    <button onClick={() => setRaiseAmount(Math.min(heroAllInTotal, Math.max(minimumRaise, game.callAmount + game.pot)))}>满池</button>
+                    <button onClick={() => setRaiseAmount(heroAllInTotal)}>全下</button>
+                    <button className="confirm-bet" onClick={() => beginOpponentSequence(Math.min(raiseAmount, heroAllInTotal))}>确认{game.callAmount === 0 ? "下注" : "加注"}</button>
                   </div>
                 </div>
               )}
