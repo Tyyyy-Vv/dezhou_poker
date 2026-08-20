@@ -23,6 +23,8 @@ test("server-renders the River poker experience", async () => {
   assert.match(html, /RIVER/);
   assert.match(html, /赢家通吃/);
   assert.match(html, /随机洗牌/);
+  assert.equal((html.match(/empty-card-slot/g) ?? []).length, 5);
+  assert.doesNotMatch(html, /class="(?:red )?card-reveal"/);
   assert.match(html, /打开账户记录/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|react-loading-skeleton/);
 });

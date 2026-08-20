@@ -81,6 +81,7 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .community-cards span, .hole-cards span { font-size: 16px; }
 .community-cards .red, .hole-cards .red { color: #bd3f3f; }
 .community-cards .card-back { display: grid; place-items: center; color: rgba(218,191,119,.5); font-family: Georgia, serif; border: 1px solid rgba(218,191,119,.25); background: repeating-linear-gradient(45deg, #152d25, #152d25 4px, #18362c 4px, #18362c 8px); }
+.community-cards .empty-card-slot { border: 1px dashed rgba(218,191,119,.11); background: rgba(0,0,0,.06); box-shadow: none; }
 .community-cards .card-reveal { animation: deal-card .42s cubic-bezier(.2,.8,.2,1) both; transform-origin: center; }
 .seat { position: absolute; display: flex; align-items: center; gap: 8px; padding: 7px 11px 7px 7px; min-width: 118px; border: 1px solid rgba(255,255,255,.11); background: linear-gradient(145deg, rgba(17,24,21,.98), rgba(7,11,10,.98)); border-radius: 25px; z-index: 5; box-shadow: 0 10px 22px rgba(0,0,0,.35); transition: opacity .25s, border-color .25s, box-shadow .25s; }
 .seat .mini-avatar { position: relative; z-index: 2; flex: 0 0 auto; width: 30px; height: 30px; font-size: 10px; }

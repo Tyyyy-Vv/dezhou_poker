@@ -42,14 +42,16 @@ const ranks = [
 ];
 
 type Card = { rank: string; value: number; suit: typeof suits[number] };
-type GamePhase = "betting" | "opponents" | "river" | "showdown" | "payout" | "gameover";
+type Street = "preflop" | "flop" | "turn" | "river";
+type GamePhase = "betting" | "opponents" | "dealing" | "showdown" | "payout" | "gameover";
 type ActionLogItem = { name: string; text: string; time: string; type: string };
-type HandResult = { winnerIds: string[]; label: string; amount: number };
+type HandResult = { winnerIds: string[]; label: string; amount: number; showdown: boolean };
 
 type GameState = {
   handNumber: number;
   handCode: number;
   bigBlind: number;
+  street: Street;
   stacks: Record<string, number>;
   hands: Record<string, Card[]>;
   board: Card[];
@@ -122,7 +124,11 @@ const evaluateFive = (cards: Card[]) => {
 };
 
 const bestHand = (cards: Card[]) => {
-  if (cards.length < 5) return { score: [0, ...cards.map((card) => card.value).sort((a, b) => b - a)], label: "高牌" };
+  if (cards.length < 5) {
+    const values = cards.map((card) => card.value).sort((a, b) => b - a);
+    if (cards.length === 2 && values[0] === values[1]) return { score: [1, values[0]], label: "口袋对子" };
+    return { score: [0, ...values], label: "高牌" };
+  }
   let best = { score: [-1], label: "高牌" };
   for (let a = 0; a < cards.length - 4; a += 1) {
     for (let b = a + 1; b < cards.length - 3; b += 1) {
@@ -175,10 +181,11 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
     handNumber,
     handCode: 820000 + Math.floor(random() * 9999),
     bigBlind,
+    street: "preflop",
     stacks,
     hands,
     board,
-    visibleBoard: 4,
+    visibleBoard: 0,
     folded,
     actions,
     actingPlayer: heroCanAct ? "hero" : null,
@@ -186,11 +193,58 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
     lastPot: 0,
     callAmount,
     phase: "betting",
-    prompt: heroCanAct ? `转牌圈 · 跟注 ¥${Math.min(callAmount, stacks.hero)}` : "你已淘汰 · 自动观战",
+    prompt: heroCanAct ? `翻牌前 · 跟注 ¥${Math.min(callAmount, stacks.hero)}` : "你已淘汰 · 自动观战",
     heroAction: stacks.hero === 0 && hands.hero ? "前注全下" : "",
     log: [{ name: "系统", text: `第 ${handNumber} 手牌已发出`, time: "刚刚", type: "deal" }],
     result: null,
     championId: null,
+  };
+};
+
+const streetLabels: Record<Street, string> = {
+  preflop: "翻牌前",
+  flop: "翻牌圈",
+  turn: "转牌圈",
+  river: "河牌圈",
+};
+
+const dealNextStreet = (current: GameState): GameState => {
+  const nextStreet: Street = current.street === "preflop" ? "flop" : current.street === "flop" ? "turn" : "river";
+  const visibleBoard = nextStreet === "flop" ? 3 : nextStreet === "turn" ? 4 : 5;
+  const cardsText = nextStreet === "flop"
+    ? current.board.slice(0, 3).map((card) => `${card.rank}${card.suit}`).join(" ")
+    : `${current.board[visibleBoard - 1].rank}${current.board[visibleBoard - 1].suit}`;
+
+  return {
+    ...current,
+    street: nextStreet,
+    phase: "dealing",
+    visibleBoard,
+    actingPlayer: null,
+    prompt: `${streetLabels[nextStreet]} ${cardsText} 已发出`,
+    log: [{ name: "系统", text: `${streetLabels[nextStreet]} ${cardsText}`, time: "刚刚", type: "deal" }, ...current.log].slice(0, 6),
+  };
+};
+
+const prepareStreetBetting = (current: GameState): GameState => {
+  const callAmount = current.street === "turn" || current.street === "river" ? current.bigBlind * 2 : current.bigBlind;
+  const actions: Record<string, PlayerAction> = {};
+  playerIds.forEach((id) => {
+    if (!current.hands[id]) actions[id] = { label: "已淘汰", type: "out", committed: 0, folded: true };
+    else if (current.folded[id]) actions[id] = { label: "本手已弃牌", type: "fold", committed: 0, folded: true };
+    else if (current.stacks[id] === 0) actions[id] = { label: "全下等待", type: "allin", committed: 0 };
+    else actions[id] = { label: "等待行动", type: "waiting", committed: 0 };
+  });
+  const heroCanAct = Boolean(current.hands.hero) && !current.folded.hero && current.stacks.hero > 0;
+
+  return {
+    ...current,
+    actions,
+    callAmount,
+    phase: "betting",
+    actingPlayer: heroCanAct ? "hero" : null,
+    heroAction: current.folded.hero ? "本手已弃牌" : current.stacks.hero === 0 && current.hands.hero ? "全下等待" : "",
+    prompt: heroCanAct ? `${streetLabels[current.street]} · 跟注 ¥${Math.min(callAmount, current.stacks.hero)}` : `${streetLabels[current.street]} · 自动进行中`,
   };
 };
 
@@ -288,22 +342,23 @@ export default function Home() {
       stacks,
       actions,
       actingPlayer: null,
-      visibleBoard: 5,
+      visibleBoard: contenders.length > 1 ? 5 : current.visibleBoard,
       lastPot: current.pot,
       pot: 0,
       phase: "payout",
       prompt: `${winnersText} 以${resultLabel}赢得 ¥${current.pot}`,
-      result: { winnerIds, label: resultLabel, amount: current.pot },
+      result: { winnerIds, label: resultLabel, amount: current.pot, showdown: contenders.length > 1 },
       championId: alive.length === 1 ? alive[0] : null,
       log: [{ name: winnersText, text: `${resultLabel} · 赢得 ¥${current.pot}`, time: "刚刚", type: "win" }, ...current.log].slice(0, 6),
     };
   };
 
   const dealNextHand = () => {
-    actionTimers.current.forEach((timer) => window.clearTimeout(timer));
-    actionTimers.current = [];
-    setShowRaise(false);
     setGame((current) => {
+      if (current.phase !== "payout" && current.phase !== "gameover") return current;
+      actionTimers.current.forEach((timer) => window.clearTimeout(timer));
+      actionTimers.current = [];
+      setShowRaise(false);
       const alive = playerIds.filter((id) => current.stacks[id] > 0);
       if (alive.length === 1) return { ...current, phase: "gameover", championId: alive[0], prompt: `${tableNames[alive[0]]} 赢得本场锦标赛` };
       return createHand(current.stacks, current.handNumber + 1);
@@ -313,7 +368,7 @@ export default function Home() {
   const applyOpponentDecision = (id: string) => {
     setGame((current) => {
       if (!current.hands[id] || current.folded[id] || current.stacks[id] === 0) return { ...current, actingPlayer: null };
-      const handStrength = bestHand([...current.hands[id], ...current.board.slice(0, 4)]).score[0];
+      const handStrength = bestHand([...current.hands[id], ...current.board.slice(0, current.visibleBoard)]).score[0];
       const holePair = current.hands[id][0].value === current.hands[id][1].value;
       const contenders = playerIds.filter((playerId) => current.hands[playerId] && !current.folded[playerId]);
       const mustContinue = contenders.length <= 1;
@@ -387,7 +442,7 @@ export default function Home() {
       };
     });
 
-    const opponentOrder = shuffle(players.map((player) => player.id).filter((id) => game.hands[id] && game.stacks[id] > 0));
+    const opponentOrder = shuffle(players.map((player) => player.id).filter((id) => game.hands[id] && !game.folded[id] && game.stacks[id] > 0));
     opponentOrder.forEach((id, index) => {
       const start = 450 + index * 1050;
       schedule(() => {
@@ -400,20 +455,23 @@ export default function Home() {
       schedule(() => applyOpponentDecision(id), start + 700);
     });
 
-    const riverDelay = 650 + opponentOrder.length * 1050;
+    const streetEndDelay = 650 + opponentOrder.length * 1050;
     schedule(() => {
-      setGame((current) => ({
-        ...current,
-        phase: "river",
-        actingPlayer: null,
-        visibleBoard: 5,
-        prompt: `河牌 ${current.board[4].rank}${current.board[4].suit} 翻开 · 准备摊牌`,
-        log: [{ name: "系统", text: `河牌 ${current.board[4].rank}${current.board[4].suit}`, time: "刚刚", type: "deal" }, ...current.log].slice(0, 6),
-      }));
-    }, riverDelay);
-    schedule(() => setGame((current) => ({ ...current, phase: "showdown", prompt: "正在比较所有未弃牌玩家的最大五张牌…" })), riverDelay + 1200);
-    schedule(() => setGame((current) => resolveShowdown(current)), riverDelay + 2200);
-    schedule(() => dealNextHand(), riverDelay + 6600);
+      setGame((current) => {
+        const contenders = playerIds.filter((id) => current.hands[id] && !current.folded[id]);
+        if (contenders.length <= 1) return resolveShowdown(current);
+        if (current.street === "river") return { ...current, phase: "showdown", actingPlayer: null, prompt: "河牌轮结束 · 正在比较所有玩家的最佳五张牌…" };
+        return dealNextStreet(current);
+      });
+    }, streetEndDelay);
+    schedule(() => {
+      setGame((current) => {
+        if (current.phase === "dealing") return prepareStreetBetting(current);
+        if (current.phase === "showdown") return resolveShowdown(current);
+        return current;
+      });
+    }, streetEndDelay + 1400);
+    schedule(() => dealNextHand(), streetEndDelay + 5800);
   };
 
   useEffect(() => {
@@ -422,9 +480,9 @@ export default function Home() {
       const timer = window.setTimeout(() => beginOpponentSequence(game.hands.hero ? "前注全下" : "旁观", 0, !game.hands.hero), 800);
       actionTimers.current.push(timer);
     }
-  // Each new hand should auto-run only when the user no longer has chips.
+  // Each betting street should auto-run when the user has folded, is all-in, or is eliminated.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game.handNumber]);
+  }, [game.handNumber, game.street, game.phase]);
 
   useEffect(() => {
     setRaiseAmount(Math.min(game.stacks.hero, Math.max(game.callAmount * 2, game.bigBlind * 3)));
@@ -442,8 +500,9 @@ export default function Home() {
   const heroBest = heroCards.length ? bestHand([...heroCards, ...game.board.slice(0, game.visibleBoard)]) : { score: [0], label: "旁观中" };
   const heroCallAmount = Math.min(game.callAmount, game.stacks.hero);
   const aliveCount = playerIds.filter((id) => game.stacks[id] > 0 || Boolean(game.hands[id])).length;
-  const revealCards = game.phase === "showdown" || game.phase === "payout" || game.phase === "gameover";
+  const revealCards = game.phase === "showdown" || ((game.phase === "payout" || game.phase === "gameover") && Boolean(game.result?.showdown));
   const isResolving = game.phase !== "betting";
+  const boardProgressText = game.visibleBoard === 0 ? "等待翻牌" : game.visibleBoard === 3 ? "等待转牌" : game.visibleBoard === 4 ? "等待河牌" : "五张公共牌已发完";
 
   return (
     <main className="app-shell">
@@ -490,7 +549,7 @@ export default function Home() {
           </aside>
 
           <section className="table-stage" aria-label="德州扑克牌桌">
-            <div className="hand-code">#{game.handCode} <span>·</span> 第 {game.handNumber} 手 · 随机洗牌</div>
+            <div className="hand-code">#{game.handCode} <span>·</span> 第 {game.handNumber} 手 · {streetLabels[game.street]} · 随机洗牌</div>
             <div className="table-light" />
             <div className="poker-table">
               <div className="felt-ring" />
@@ -531,7 +590,7 @@ export default function Home() {
                   <div className={card.suit === "♥" || card.suit === "♦" ? "red card-reveal" : "card-reveal"} key={`${card.rank}-${card.suit}-${index}`}>
                     <b>{card.rank}</b><span>{card.suit}</span>
                   </div>
-                ) : <div className="card-back" key={`hidden-${index}`}>?</div>)}
+                ) : <div className="empty-card-slot" aria-hidden="true" key={`hidden-${index}`} />)}
               </div>
               <div className="dealer-chip">D</div>
               <div className={`hero-seat ${game.actingPlayer === "hero" ? "is-active" : ""} ${game.result?.winnerIds.includes("hero") ? "is-winner" : ""}`}>
@@ -598,7 +657,7 @@ export default function Home() {
             <p className="eyebrow">本手牌</p>
             <h2>{heroBest.label}</h2>
             <div className="equity"><div><span style={{ width: `${Math.min(94, 24 + heroBest.score[0] * 9 + (heroCards[0]?.value ?? 0))}%` }} /></div><b>{heroCards.length ? `${Math.min(94, 24 + heroBest.score[0] * 9 + (heroCards[0]?.value ?? 0))}%` : "--"}</b></div>
-            <p className="muted">动态牌力估算 · {game.visibleBoard === 4 ? "等待河牌" : "五张公共牌已发完"}</p>
+            <p className="muted">动态牌力估算 · {boardProgressText}</p>
             <div className="hand-outs">
               <span><b>{aliveCount}</b><small>存活玩家</small></span>
               <span><b>¥{game.bigBlind}</b><small>当前大盲</small></span>
