@@ -43,8 +43,11 @@ test("removes starter-only assets and metadata", async () => {
   assert.match(page, /资金流水/);
   assert.match(page, /牌局记录/);
   assert.match(page, /estimateHandStrength/);
-  assert.match(page, /raisesThisStreet/);
-  assert.match(page, /无人下注，可以过牌或下注/);
+  assert.match(page, /advanceBetting/);
+  assert.match(page, /handCommitted/);
+  assert.match(page, /raiseRights/);
+  assert.match(page, /current\.minRaise/);
+  assert.match(page, /边池/);
   assert.match(layout, /RIVER 德扑竞技/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

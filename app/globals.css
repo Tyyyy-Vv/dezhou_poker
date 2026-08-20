@@ -150,6 +150,8 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .showdown-banner small { display: block; color: var(--green); font-size: 7px; letter-spacing: .18em; }
 .showdown-banner strong { display: block; margin-top: 5px; font: 17px Georgia, serif; }
 .showdown-banner span { display: block; margin-top: 4px; color: var(--gold); font-size: 9px; }
+.pot-awards { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-top: 7px; }
+.pot-awards em { padding: 3px 6px; border: 1px solid rgba(218,191,119,.18); border-radius: 999px; background: rgba(218,191,119,.06); color: #b9ad87; font-size: 6px; font-style: normal; }
 .showdown-banner i { display: block; margin-top: 7px; color: #69736e; font-size: 7px; font-style: normal; }
 .champion-banner { top: 51%; padding: 18px 24px; border-color: rgba(218,191,119,.58); box-shadow: 0 18px 55px rgba(0,0,0,.62), 0 0 40px rgba(218,191,119,.18); }
 .champion-banner small, .champion-banner span { color: var(--gold); }
