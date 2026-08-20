@@ -1,17 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type View = "table" | "account";
 type RecordTab = "funds" | "games";
 
+type ActionType = "raise" | "call" | "check" | "fold" | "thinking" | "waiting";
+
+type PlayerAction = {
+  label: string;
+  type: ActionType;
+  committed: number;
+  folded?: boolean;
+};
+
 const players = [
-  { name: "阿哲", stack: "8,420", cards: "A♣ K♣", className: "seat top", status: "加注 320" },
-  { name: "Mia", stack: "4,680", cards: "", className: "seat right", status: "跟注" },
-  { name: "Old Fox", stack: "11,200", cards: "", className: "seat left", status: "弃牌" },
-  { name: "Kai", stack: "6,740", cards: "", className: "seat bottom-left", status: "等待" },
-  { name: "Lynn", stack: "9,060", cards: "", className: "seat bottom-right", status: "等待" },
+  { id: "azhe", name: "阿哲", stack: "8,420", className: "seat top" },
+  { id: "mia", name: "Mia", stack: "4,680", className: "seat right" },
+  { id: "oldfox", name: "Old Fox", stack: "11,200", className: "seat left" },
+  { id: "kai", name: "Kai", stack: "6,740", className: "seat bottom-left" },
+  { id: "lynn", name: "Lynn", stack: "9,060", className: "seat bottom-right" },
 ];
+
+const initialPlayerActions: Record<string, PlayerAction> = {
+  azhe: { label: "加注至 ¥320", type: "raise", committed: 320 },
+  mia: { label: "跟注 ¥320", type: "call", committed: 320 },
+  oldfox: { label: "弃牌", type: "fold", committed: 0, folded: true },
+  kai: { label: "过牌", type: "check", committed: 0 },
+  lynn: { label: "等待行动", type: "waiting", committed: 0 },
+};
 
 const transactions = [
   { time: "今天 22:16", title: "牌局结算", detail: "#NLH-829104 · 午夜河牌", amount: "+¥1,680.00", balance: "¥12,840.00", kind: "win" },
@@ -46,6 +63,24 @@ export default function Home() {
   const [showRaise, setShowRaise] = useState(false);
   const [raiseAmount, setRaiseAmount] = useState(800);
   const [notice, setNotice] = useState("");
+  const [playerActions, setPlayerActions] = useState(initialPlayerActions);
+  const [actingPlayer, setActingPlayer] = useState<string | null>(null);
+  const [heroAction, setHeroAction] = useState("");
+  const [actionPrompt, setActionPrompt] = useState("跟注 ¥320");
+  const [callAmount, setCallAmount] = useState(320);
+  const [handPot, setHandPot] = useState(1240);
+  const [isResolving, setIsResolving] = useState(false);
+  const [actionLog, setActionLog] = useState([
+    { name: "阿哲", text: "加注至 ¥320", time: "刚刚", type: "raise" },
+    { name: "Mia", text: "跟注 ¥320", time: "8 秒前", type: "call" },
+    { name: "Old Fox", text: "弃牌", time: "12 秒前", type: "fold" },
+    { name: "系统", text: "发出转牌 4♦", time: "19 秒前", type: "deal" },
+  ]);
+  const actionTimers = useRef<number[]>([]);
+
+  useEffect(() => () => {
+    actionTimers.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
 
   const flash = (message: string) => {
     setNotice(message);
@@ -55,6 +90,59 @@ export default function Home() {
   const openRecords = (tab: RecordTab) => {
     setRecordTab(tab);
     setView("account");
+  };
+
+  const schedule = (callback: () => void, delay: number) => {
+    actionTimers.current.push(window.setTimeout(callback, delay));
+  };
+
+  const updateOpponent = (id: string, action: PlayerAction) => {
+    setPlayerActions((current) => ({ ...current, [id]: action }));
+  };
+
+  const addActionLog = (name: string, text: string, type: string) => {
+    setActionLog((current) => [{ name, text, time: "刚刚", type }, ...current].slice(0, 5));
+  };
+
+  const beginOpponentSequence = (label: string, contribution: number) => {
+    if (isResolving) return;
+    actionTimers.current.forEach((timer) => window.clearTimeout(timer));
+    actionTimers.current = [];
+    setIsResolving(true);
+    setShowRaise(false);
+    setHeroAction(label);
+    setActionPrompt("其他玩家行动中…");
+    setHandPot((current) => current + contribution);
+
+    schedule(() => {
+      setActingPlayer("lynn");
+      updateOpponent("lynn", { label: "思考中", type: "thinking", committed: 0 });
+    }, 450);
+
+    schedule(() => {
+      updateOpponent("lynn", { label: "跟注 ¥320", type: "call", committed: 320 });
+      addActionLog("Lynn", "跟注 ¥320", "call");
+      setHandPot((current) => current + 320);
+      setActingPlayer("kai");
+      updateOpponent("kai", { label: "思考中", type: "thinking", committed: 0 });
+    }, 1450);
+
+    schedule(() => {
+      updateOpponent("kai", { label: "弃牌", type: "fold", committed: 0, folded: true });
+      addActionLog("Kai", "弃牌", "fold");
+      setActingPlayer("azhe");
+      updateOpponent("azhe", { label: "思考中", type: "thinking", committed: 320 });
+    }, 2550);
+
+    schedule(() => {
+      updateOpponent("azhe", { label: "加注至 ¥960", type: "raise", committed: 960 });
+      addActionLog("阿哲", "加注至 ¥960", "raise");
+      setHandPot((current) => current + 640);
+      setActingPlayer(null);
+      setCallAmount(640);
+      setActionPrompt("阿哲再加注 · 需补 ¥640");
+      setIsResolving(false);
+    }, 3750);
   };
 
   return (
@@ -107,15 +195,29 @@ export default function Home() {
             <div className="poker-table">
               <div className="felt-ring" />
               <span className="watermark">RIVER</span>
-              {players.map((player) => (
-                <div className={player.className} key={player.name}>
+              {players.map((player) => {
+                const action = playerActions[player.id];
+                const isActing = actingPlayer === player.id;
+                return (
+                <div className={`${player.className} ${isActing ? "is-active" : ""} ${action.folded ? "is-folded" : ""}`} key={player.name}>
+                  <div className="opponent-cards" aria-label={`${player.name} 的两张未公开手牌`}>
+                    <span /><span />
+                  </div>
                   <div className="mini-avatar">{player.name.slice(0, 1)}</div>
-                  <div><b>{player.name}</b><span>¥{player.stack}</span></div>
-                  <i className={player.status === "弃牌" ? "folded" : ""}>{player.status}</i>
-                  {player.cards && <em>{player.cards}</em>}
+                  <div className="seat-copy"><b>{player.name}</b><span>¥{player.stack}</span></div>
+                  <div className={`action-bubble ${action.type}`}>
+                    {action.type === "thinking" && <span className="thinking-dots"><i /><i /><i /></span>}
+                    {action.label}
+                  </div>
+                  {action.committed > 0 && (
+                    <div className="wager-marker" aria-label={`${player.name} 已投入 ${action.committed} 元`}>
+                      <span className="chip-stack"><i /><i /><i /></span>
+                      <b>¥{action.committed}</b>
+                    </div>
+                  )}
                 </div>
-              ))}
-              <div className="pot"><span>底池</span><strong>¥ 1,240</strong></div>
+              )})}
+              <div className="pot"><span>底池</span><strong>¥ {handPot.toLocaleString()}</strong></div>
               <div className="community-cards" aria-label="公共牌">
                 <div><b>10</b><span>♠</span></div>
                 <div className="red"><b>J</b><span>♥</span></div>
@@ -130,16 +232,17 @@ export default function Home() {
                   <div><b>K</b><span>♠</span></div>
                 </div>
                 <div className="hero-info"><b>我</b><span>¥12,840</span></div>
+                {heroAction && <div className="hero-action">{heroAction}</div>}
               </div>
             </div>
 
             <div className="action-bar">
-              <div className="action-copy"><span>轮到你行动 <i /></span><b>跟注 ¥320</b></div>
+              <div className="action-copy"><span>{isResolving ? "对手行动中" : "轮到你行动"} <i /></span><b>{actionPrompt}</b></div>
               <div className="action-buttons">
-                <button className="ghost" onClick={() => flash("你选择了弃牌")}>弃牌</button>
-                <button className="ghost" onClick={() => flash("本轮不可过牌")}>过牌</button>
-                <button className="primary" onClick={() => flash("跟注 ¥320 · 等待其他玩家")}>跟注 · ¥320</button>
-                <button className={showRaise ? "raise selected" : "raise"} onClick={() => setShowRaise(!showRaise)}>加注</button>
+                <button className="ghost" disabled={isResolving} onClick={() => beginOpponentSequence("弃牌", 0)}>弃牌</button>
+                <button className="ghost" disabled={isResolving} onClick={() => flash("当前有人下注，本轮不可过牌")}>过牌</button>
+                <button className="primary" disabled={isResolving} onClick={() => beginOpponentSequence(`跟注 ¥${callAmount}`, callAmount)}>跟注 · ¥{callAmount}</button>
+                <button className={showRaise ? "raise selected" : "raise"} disabled={isResolving} onClick={() => setShowRaise(!showRaise)}>加注</button>
               </div>
               {showRaise && (
                 <div className="raise-tray">
@@ -150,7 +253,7 @@ export default function Home() {
                     <button onClick={() => setRaiseAmount(930)}>3/4 底池</button>
                     <button onClick={() => setRaiseAmount(1240)}>满池</button>
                     <button onClick={() => setRaiseAmount(4000)}>全下</button>
-                    <button className="confirm-bet" onClick={() => { setShowRaise(false); flash(`已加注至 ¥${raiseAmount.toLocaleString()}`); }}>确认加注</button>
+                    <button className="confirm-bet" onClick={() => beginOpponentSequence(`加注至 ¥${raiseAmount.toLocaleString()}`, raiseAmount)}>确认加注</button>
                   </div>
                 </div>
               )}
@@ -169,10 +272,14 @@ export default function Home() {
             <div className="divider" />
             <div className="activity-title"><span>牌桌动态</span><button onClick={() => openRecords("games")}>全部记录</button></div>
             <ul className="activity-list">
-              <li><span className="activity-icon">♠</span><p><b>阿哲</b> 加注到 ¥320<small>刚刚</small></p></li>
-              <li><span className="activity-icon">●</span><p><b>Mia</b> 跟注 ¥320<small>8 秒前</small></p></li>
-              <li><span className="activity-icon muted-icon">×</span><p><b>Old Fox</b> 弃牌<small>12 秒前</small></p></li>
-              <li><span className="activity-icon gold-icon">D</span><p><b>系统</b> 发出转牌 4♦<small>19 秒前</small></p></li>
+              {actionLog.map((item, index) => (
+                <li className={index === 0 ? "latest-action" : ""} key={`${item.name}-${item.text}-${index}`}>
+                  <span className={`activity-icon ${item.type === "fold" ? "muted-icon" : ""} ${item.type === "raise" || item.type === "deal" ? "gold-icon" : ""}`}>
+                    {item.type === "fold" ? "×" : item.type === "raise" ? "↑" : item.type === "deal" ? "D" : "●"}
+                  </span>
+                  <p><b>{item.name}</b> {item.text}<small>{item.time}</small></p>
+                </li>
+              ))}
             </ul>
           </aside>
         </section>
