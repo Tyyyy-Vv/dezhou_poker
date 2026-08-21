@@ -27,6 +27,7 @@ test("server-renders the River poker experience", async () => {
   assert.match(html, /小盲 SB/);
   assert.match(html, /大盲 BB/);
   assert.match(html, /枪口 UTG/);
+  assert.match(html, /音效关/);
   assert.equal((html.match(/empty-card-slot/g) ?? []).length, 5);
   assert.doesNotMatch(html, /class="(?:red )?card-reveal"/);
   assert.match(html, /打开账户记录/);
@@ -34,10 +35,11 @@ test("server-renders the River poker experience", async () => {
 });
 
 test("removes starter-only assets and metadata", async () => {
-  const [page, layout, packageJson] = await Promise.all([
+  const [page, layout, packageJson, styles] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /资金流水/);
@@ -48,6 +50,11 @@ test("removes starter-only assets and metadata", async () => {
   assert.match(page, /raiseRights/);
   assert.match(page, /current\.minRaise/);
   assert.match(page, /边池/);
+  assert.match(page, /estimateShowdownEquity/);
+  assert.match(page, /LOCAL_HISTORY_KEY/);
+  assert.match(page, /HERO_TURN_SECONDS/);
+  assert.match(page, /replay-timeline/);
+  assert.doesNotMatch(styles, /\.seat\.bottom-left, \.seat\.bottom-right \{ display: none/);
   assert.match(layout, /RIVER 德扑竞技/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));

@@ -57,6 +57,19 @@ type GamePhase = "betting" | "opponents" | "dealing" | "showdown" | "payout" | "
 type ActionLogItem = { name: string; text: string; time: string; type: string };
 type PotAward = { label: string; amount: number; winnerIds: string[]; isRefund?: boolean };
 type HandResult = { winnerIds: string[]; label: string; amount: number; showdown: boolean; pots: PotAward[] };
+type HandHistoryRecord = {
+  id: string;
+  time: string;
+  handNumber: number;
+  handCode: number;
+  stakes: string;
+  heroCards: string;
+  board: string;
+  result: string;
+  delta: number;
+  actions: ActionLogItem[];
+  pots: PotAward[];
+};
 
 type GameState = {
   handNumber: number;
@@ -68,6 +81,7 @@ type GameState = {
   bigBlindId: string;
   street: Street;
   stacks: Record<string, number>;
+  startingStacks: Record<string, number>;
   hands: Record<string, Card[]>;
   board: Card[];
   visibleBoard: number;
@@ -87,6 +101,7 @@ type GameState = {
   prompt: string;
   heroAction: string;
   log: ActionLogItem[];
+  timeline: ActionLogItem[];
   result: HandResult | null;
   championId: string | null;
 };
@@ -269,6 +284,39 @@ const estimateHandStrength = (state: GameState, id: string) => {
   return Math.min(1, categoryBase + kicker + flushDraw + straightDraw);
 };
 
+const cardKey = (card: Card) => `${card.rank}${card.suit}`;
+
+const estimateShowdownEquity = (state: GameState, id: string, trials = 42) => {
+  const holeCards = state.hands[id];
+  if (!holeCards) return 0;
+  const opponentCount = Math.max(1, playerIds.filter((playerId) => playerId !== id && state.hands[playerId] && !state.folded[playerId]).length);
+  const visibleBoard = state.board.slice(0, state.visibleBoard);
+  const known = new Set([...holeCards, ...visibleBoard].map(cardKey));
+  const unseen = createDeck().filter((card) => !known.has(cardKey(card)));
+  let equity = 0;
+
+  for (let trial = 0; trial < trials; trial += 1) {
+    const sample = shuffle(unseen);
+    let cursor = 0;
+    const runout = [...visibleBoard];
+    while (runout.length < 5) runout.push(sample[cursor++]);
+    const heroScore = bestHand([...holeCards, ...runout]).score;
+    let beaten = false;
+    let ties = 0;
+    for (let opponent = 0; opponent < opponentCount; opponent += 1) {
+      const opponentScore = bestHand([sample[cursor++], sample[cursor++], ...runout]).score;
+      const comparison = compareScores(heroScore, opponentScore);
+      if (comparison < 0) {
+        beaten = true;
+        break;
+      }
+      if (comparison === 0) ties += 1;
+    }
+    if (!beaten) equity += 1 / (ties + 1);
+  }
+  return equity / trials;
+};
+
 const createHand = (previousStacks: Record<string, number>, handNumber: number, seed?: number, previousDealerId?: string): GameState => {
   const random = seed === undefined ? Math.random : seededRandom(seed);
   const activeIds = playerIds.filter((id) => previousStacks[id] > 0);
@@ -326,6 +374,11 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
   const actingPlayer = playersWithChips.length > 1 || lonePlayerOwesBlind
     ? clockwiseAfter(bigBlindId, activeIds).find((id) => stacks[id] > 0) ?? null
     : null;
+  const initialTimeline: ActionLogItem[] = [
+    { name: "系统", text: `第 ${handNumber} 手牌已发出 · ${tableNames[dealerId]}在庄位`, time: "刚刚", type: "deal" },
+    { name: tableNames[smallBlindId], text: `小盲 ¥${Math.min(smallBlind, previousStacks[smallBlindId])}`, time: "刚刚", type: "call" },
+    { name: tableNames[bigBlindId], text: `大盲 ¥${Math.min(bigBlind, previousStacks[bigBlindId])}`, time: "刚刚", type: "call" },
+  ];
   const initialState: GameState = {
     handNumber,
     handCode: 820000 + Math.floor(random() * 9999),
@@ -336,6 +389,7 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
     bigBlindId,
     street: "preflop",
     stacks,
+    startingStacks: { ...previousStacks },
     hands,
     board,
     visibleBoard: 0,
@@ -354,11 +408,8 @@ const createHand = (previousStacks: Record<string, number>, handNumber: number, 
     phase: actingPlayer === "hero" ? "betting" : "opponents",
     prompt: actingPlayer ? `${positionLabels[positions[actingPlayer]!]} · ${tableNames[actingPlayer]} 率先行动` : "所有剩余玩家均已全下",
     heroAction: actions.hero?.committed > 0 ? actions.hero.label : "",
-    log: [
-      { name: tableNames[bigBlindId], text: `大盲 ¥${Math.min(bigBlind, previousStacks[bigBlindId])}`, time: "刚刚", type: "call" },
-      { name: tableNames[smallBlindId], text: `小盲 ¥${Math.min(smallBlind, previousStacks[smallBlindId])}`, time: "刚刚", type: "call" },
-      { name: "系统", text: `第 ${handNumber} 手牌已发出 · ${tableNames[dealerId]}在庄位`, time: "刚刚", type: "deal" },
-    ],
+    log: [...initialTimeline].reverse(),
+    timeline: initialTimeline,
     result: null,
     championId: null,
   };
@@ -379,6 +430,7 @@ const dealNextStreet = (current: GameState): GameState => {
   const cardsText = nextStreet === "flop"
     ? current.board.slice(0, 3).map((card) => `${card.rank}${card.suit}`).join(" ")
     : `${current.board[visibleBoard - 1].rank}${current.board[visibleBoard - 1].suit}`;
+  const timelineEntry: ActionLogItem = { name: "系统", text: `${streetLabels[nextStreet]} ${cardsText}`, time: "刚刚", type: "deal" };
 
   return {
     ...current,
@@ -387,7 +439,8 @@ const dealNextStreet = (current: GameState): GameState => {
     visibleBoard,
     actingPlayer: null,
     prompt: `${streetLabels[nextStreet]} ${cardsText} 已发出`,
-    log: [{ name: "系统", text: `${streetLabels[nextStreet]} ${cardsText}`, time: "刚刚", type: "deal" }, ...current.log].slice(0, 6),
+    log: [timelineEntry, ...current.log].slice(0, 6),
+    timeline: [...current.timeline, timelineEntry],
   };
 };
 
@@ -549,6 +602,7 @@ const applyBettingChoice = (current: GameState, id: string, choice: BettingChoic
     raiseRights[id] = false;
   }
 
+  const timelineEntry: ActionLogItem = { name: tableNames[id], text: `${current.positions[id] ? positionLabels[current.positions[id]!] : ""} · ${label}`, time: "刚刚", type: actionType };
   const next: GameState = {
     ...current,
     stacks,
@@ -564,7 +618,8 @@ const applyBettingChoice = (current: GameState, id: string, choice: BettingChoic
     hasFullBet,
     raisesThisStreet,
     heroAction: id === "hero" ? label : current.heroAction,
-    log: [{ name: tableNames[id], text: `${current.positions[id] ? positionLabels[current.positions[id]!] : ""} · ${label}`, time: "刚刚", type: actionType }, ...current.log].slice(0, 6),
+    log: [timelineEntry, ...current.log].slice(0, 6),
+    timeline: [...current.timeline, timelineEntry],
   };
   return advanceBetting(next, id);
 };
@@ -596,6 +651,10 @@ const chartData = [
   { day: "今天", value: 100, label: "+1,680" },
 ];
 
+const LOCAL_HISTORY_KEY = "river-poker-hand-history-v1";
+const LOCAL_SOUND_KEY = "river-poker-sound-enabled";
+const HERO_TURN_SECONDS = 15;
+
 export default function Home() {
   const [view, setView] = useState<View>("table");
   const [recordTab, setRecordTab] = useState<RecordTab>("funds");
@@ -603,13 +662,52 @@ export default function Home() {
   const [raiseAmount, setRaiseAmount] = useState(120);
   const [notice, setNotice] = useState("");
   const [game, setGame] = useState<GameState>(() => createHand(initialStacks, 1, 829104));
+  const [handHistory, setHandHistory] = useState<HandHistoryRecord[]>([]);
+  const [selectedHand, setSelectedHand] = useState<HandHistoryRecord | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [turnSeconds, setTurnSeconds] = useState(0);
   const actionTimers = useRef<number[]>([]);
   const clientShuffled = useRef(false);
+  const historyLoaded = useRef(false);
+  const recordedHands = useRef(new Set<string>());
+  const previousSoundState = useRef({ visibleBoard: 0, phase: "" });
+
+  const playTone = (frequency: number, duration = .08, force = false) => {
+    if (!force && !soundEnabled) return;
+    try {
+      const context = new window.AudioContext();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.frequency.value = frequency;
+      oscillator.type = "sine";
+      gain.gain.setValueAtTime(.055, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(.001, context.currentTime + duration);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + duration);
+      oscillator.addEventListener("ended", () => void context.close(), { once: true });
+    } catch {
+      // Sound is optional and some browsers block audio before user interaction.
+    }
+  };
 
   useEffect(() => {
     if (clientShuffled.current) return;
     clientShuffled.current = true;
     setGame(createHand(initialStacks, 1));
+  }, []);
+
+  useEffect(() => {
+    try {
+      const storedHistory = JSON.parse(window.localStorage.getItem(LOCAL_HISTORY_KEY) ?? "[]") as HandHistoryRecord[];
+      setHandHistory(Array.isArray(storedHistory) ? storedHistory.slice(0, 100) : []);
+      setSoundEnabled(window.localStorage.getItem(LOCAL_SOUND_KEY) === "true");
+    } catch {
+      setHandHistory([]);
+    } finally {
+      historyLoaded.current = true;
+    }
   }, []);
 
   useEffect(() => () => {
@@ -620,6 +718,75 @@ export default function Home() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 2200);
   };
+
+  const toggleSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    window.localStorage.setItem(LOCAL_SOUND_KEY, String(next));
+    if (next) playTone(620, .11, true);
+    flash(next ? "牌桌音效已开启" : "牌桌音效已关闭");
+  };
+
+  useEffect(() => {
+    if (!historyLoaded.current || game.phase !== "payout" || !game.result || !game.hands.hero) return;
+    const historyId = `${game.handCode}-${game.handNumber}`;
+    if (recordedHands.current.has(historyId)) return;
+    recordedHands.current.add(historyId);
+    const delta = game.stacks.hero - game.startingStacks.hero;
+    const record: HandHistoryRecord = {
+      id: historyId,
+      time: new Date().toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+      handNumber: game.handNumber,
+      handCode: game.handCode,
+      stakes: `¥${game.bigBlind / 2} / ¥${game.bigBlind}`,
+      heroCards: (game.hands.hero ?? []).map(cardKey).join(" ") || "旁观",
+      board: game.board.slice(0, game.visibleBoard).map(cardKey).join(" ") || "未发公共牌",
+      result: `${game.result.label} · ${delta >= 0 ? "+" : ""}¥${delta}`,
+      delta,
+      actions: game.timeline,
+      pots: game.result.pots,
+    };
+    setHandHistory((current) => {
+      const next = [record, ...current.filter((item) => item.id !== record.id)].slice(0, 100);
+      try { window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(next)); } catch { /* Device storage may be unavailable. */ }
+      return next;
+    });
+  }, [game.phase, game.handCode, game.result, game.stacks.hero, game.startingStacks.hero, game.timeline, game.visibleBoard, game.board, game.hands.hero, game.handNumber, game.bigBlind]);
+
+  useEffect(() => {
+    if (game.phase !== "betting" || game.actingPlayer !== "hero") {
+      setTurnSeconds(0);
+      return;
+    }
+    const deadline = Date.now() + HERO_TURN_SECONDS * 1000;
+    setTurnSeconds(HERO_TURN_SECONDS);
+    const timer = window.setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setTurnSeconds(remaining);
+      if (remaining > 0) return;
+      window.clearInterval(timer);
+      setShowRaise(false);
+      setGame((current) => {
+        if (current.phase !== "betting" || current.actingPlayer !== "hero") return current;
+        const committed = current.actions.hero?.committed ?? 0;
+        const choice: BettingChoice = current.callAmount > committed ? { kind: "fold" } : { kind: "check" };
+        return applyBettingChoice(current, "hero", choice);
+      });
+      flash("行动超时，系统已自动过牌或弃牌");
+    }, 250);
+    return () => window.clearInterval(timer);
+  // Restart the clock only when the turn actually changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.handNumber, game.street, game.phase, game.actingPlayer, game.raisesThisStreet]);
+
+  useEffect(() => {
+    const previous = previousSoundState.current;
+    if (soundEnabled && game.visibleBoard > previous.visibleBoard) playTone(500 + game.visibleBoard * 35, .09);
+    if (soundEnabled && game.phase === "payout" && previous.phase !== "payout") playTone(game.result?.winnerIds.includes("hero") ? 780 : 320, .16);
+    previousSoundState.current = { visibleBoard: game.visibleBoard, phase: game.phase };
+  // Sound follows visible card and payout transitions only.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.visibleBoard, game.phase, soundEnabled]);
 
   const openRecords = (tab: RecordTab) => {
     setRecordTab(tab);
@@ -684,6 +851,7 @@ export default function Home() {
     const alive = playerIds.filter((id) => stacks[id] > 0);
     const contestedAwards = awards.filter((award) => !award.isRefund);
     const potSummary = contestedAwards.length > 1 ? `主池与 ${contestedAwards.length - 1} 个边池已分别结算` : "主池已结算";
+    const timelineEntry: ActionLogItem = { name: winnersText, text: `${resultLabel} · ${potSummary} ¥${current.pot}`, time: "刚刚", type: "win" };
 
     return {
       ...current,
@@ -697,7 +865,8 @@ export default function Home() {
       prompt: `${winnersText} 获得筹码 · ${potSummary}`,
       result: { winnerIds, label: resultLabel, amount: current.pot, showdown: contenders.length > 1, pots: awards },
       championId: alive.length === 1 ? alive[0] : null,
-      log: [{ name: winnersText, text: `${resultLabel} · ${potSummary} ¥${current.pot}`, time: "刚刚", type: "win" }, ...current.log].slice(0, 6),
+      log: [timelineEntry, ...current.log].slice(0, 6),
+      timeline: [...current.timeline, timelineEntry],
     };
   };
 
@@ -718,18 +887,19 @@ export default function Home() {
     const position = current.positions[id] ?? "UTG";
     const positionBonus: Partial<Record<PositionCode, number>> = { BTN: .08, "BTN/SB": .05, CO: .065, HJ: .025, UTG: -.045, SB: -.01, BB: 0 };
     const handStrength = estimateHandStrength(current, id);
+    const showdownEquity = estimateShowdownEquity(current, id, current.street === "preflop" ? 34 : 46);
     const committed = current.actions[id]?.committed ?? 0;
     const toCall = Math.min(current.stacks[id], Math.max(0, current.callAmount - committed));
     const potOdds = toCall / Math.max(1, current.pot + toCall);
-    const decisionScore = handStrength + (positionBonus[position] ?? 0) + (profile.looseness - .5) * .11 + (Math.random() - .5) * .12;
-    const foldThreshold = .32 + potOdds * .52 - profile.looseness * .08;
+    const decisionScore = handStrength * .55 + showdownEquity * .62 + (positionBonus[position] ?? 0) + (profile.looseness - .5) * .11 + (Math.random() - .5) * .1;
+    const foldThreshold = .3 + potOdds * .56 - profile.looseness * .08;
     if (toCall > 0 && decisionScore < foldThreshold && Math.random() < .9) return { kind: "fold" };
 
     const maximumTarget = committed + current.stacks[id];
     const canRaise = current.raiseRights[id] && maximumTarget > current.callAmount;
     const latePosition = position === "BTN" || position === "BTN/SB" || position === "CO";
     const bluffRaise = latePosition && toCall === 0 && Math.random() < .045 + profile.aggression * .07;
-    const valueThreshold = current.street === "preflop" ? .73 : .68;
+    const valueThreshold = current.street === "preflop" ? .68 : .64;
     const shouldRaise = canRaise && (decisionScore > valueThreshold - profile.aggression * .08 || bluffRaise);
     if (shouldRaise) {
       const unit = Math.max(10, current.bigBlind / 2);
@@ -750,6 +920,7 @@ export default function Home() {
 
   const handleHeroAction = (choice: BettingChoice) => {
     setShowRaise(false);
+    playTone(choice.kind === "raise" ? 690 : choice.kind === "fold" ? 260 : 520, .075);
     setGame((current) => current.actingPlayer === "hero" ? applyBettingChoice(current, "hero", choice) : current);
   };
 
@@ -815,6 +986,7 @@ export default function Home() {
     || ((game.phase === "payout" || game.phase === "gameover") && Boolean(game.result?.showdown));
   const isResolving = game.phase !== "betting";
   const boardProgressText = game.visibleBoard === 0 ? "等待翻牌" : game.visibleBoard === 3 ? "等待转牌" : game.visibleBoard === 4 ? "等待河牌" : "五张公共牌已发完";
+  const localProfit = handHistory.reduce((sum, hand) => sum + hand.delta, 0);
 
   return (
     <main className="app-shell">
@@ -828,6 +1000,7 @@ export default function Home() {
           <button className={view === "account" ? "active" : ""} onClick={() => openRecords("games")}>战绩</button>
           <button onClick={() => flash("俱乐部功能即将开放")}>俱乐部</button>
         </nav>
+        <button className={`sound-toggle ${soundEnabled ? "on" : ""}`} aria-pressed={soundEnabled} onClick={toggleSound}>{soundEnabled ? "♪ 音效开" : "♪ 音效关"}</button>
         <button className="account-chip" onClick={() => openRecords("funds")} aria-label="打开账户记录">
           <span className="status-dot" />
           <span><small>可用筹码</small><b>¥ 12,840.00</b></span>
@@ -940,6 +1113,7 @@ export default function Home() {
                 <span>{game.phase === "gameover" ? "赛事结束" : game.phase === "payout" ? "本手已结算" : isResolving ? "牌局自动进行中" : "轮到你行动"} <i /></span>
                 <b>{game.prompt}</b>
               </div>
+              {canHeroAct && <div className={`time-bank ${turnSeconds <= 5 ? "danger" : ""}`} aria-label={`剩余行动时间 ${turnSeconds} 秒`}><b>{turnSeconds}</b><span>秒</span><i><em style={{ width: `${turnSeconds / HERO_TURN_SECONDS * 100}%` }} /></i></div>}
               {game.phase === "gameover" ? (
                 <div className="action-buttons"><button className="primary" onClick={restartMatch}>重新开始锦标赛</button></div>
               ) : game.phase === "payout" ? (
@@ -1000,7 +1174,7 @@ export default function Home() {
               <button className="back-link" onClick={() => setView("table")}>← 返回牌桌</button>
               <p className="eyebrow">ACCOUNT CENTER</p>
               <h1>账户与记录</h1>
-              <p>查看资金变化、牌局表现与结算明细。</p>
+              <p>查看演示资金账户，以及自动保存在本机的真实手牌与行动回放。</p>
             </div>
             <div className="account-actions">
               <button onClick={() => flash("充值通道为演示功能")}>充值</button>
@@ -1016,14 +1190,14 @@ export default function Home() {
               <b className="card-symbol">¥</b>
             </article>
             <article className="summary-card">
-              <span>近 30 天盈亏</span>
-              <strong className="gain">+¥ 4,268.00</strong>
-              <small className="positive-pill">↑ 18.6%</small>
+              <span>本机实战盈亏</span>
+              <strong className={localProfit >= 0 ? "gain" : "loss"}>{localProfit >= 0 ? "+" : ""}¥ {localProfit.toLocaleString()}</strong>
+              <small className={localProfit >= 0 ? "positive-pill" : "loss"}>来自当前设备牌局</small>
             </article>
             <article className="summary-card">
-              <span>总牌局场次</span>
-              <strong>126 <em>场</em></strong>
-              <small>3,842 手牌 · 胜率 56%</small>
+              <span>本机已记录</span>
+              <strong>{handHistory.length} <em>手</em></strong>
+              <small>每手均可查看完整行动线</small>
             </article>
             <article className="summary-card">
               <span>当前等级</span>
@@ -1066,6 +1240,7 @@ export default function Home() {
                 <button role="tab" aria-selected={recordTab === "funds"} className={recordTab === "funds" ? "active" : ""} onClick={() => setRecordTab("funds")}>资金流水</button>
                 <button role="tab" aria-selected={recordTab === "games"} className={recordTab === "games" ? "active" : ""} onClick={() => setRecordTab("games")}>牌局记录</button>
               </div>
+              <span className="local-record-badge">本机已保存 {handHistory.length} 手</span>
               <select aria-label="记录时间范围" defaultValue="30"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 3 个月</option></select>
             </div>
 
@@ -1083,17 +1258,41 @@ export default function Home() {
               </div>
             ) : (
               <div className="record-table games-table" role="table" aria-label="牌局记录">
-                <div className="table-row table-head" role="row"><span>时间</span><span>牌桌</span><span>级别</span><span>手牌</span><span>带入</span><span>结果</span></div>
-                {games.map((game) => (
-                  <button className="table-row" role="row" key={`${game.time}-${game.room}`} onClick={() => flash(`${game.room} · 牌局详情为演示数据`)}>
-                    <span className="time-cell">{game.time}</span><span className="room-cell"><i>♠</i>{game.room}</span><span>{game.stakes}</span><span>{game.hands}</span><span>{game.buyin}</span><strong className={game.kind === "win" ? "gain" : "loss"}>{game.result}</strong>
+                <div className="table-row table-head" role="row"><span>时间</span><span>牌桌</span><span>级别</span><span>手数</span><span>我的底牌</span><span>结果</span></div>
+                {handHistory.length > 0 ? handHistory.map((hand) => (
+                  <button className="table-row" role="row" key={hand.id} onClick={() => setSelectedHand(hand)}>
+                    <span className="time-cell">{hand.time}</span><span className="room-cell"><i>♠</i>本机锦标赛 #{hand.handCode}</span><span>{hand.stakes}</span><span>第 {hand.handNumber} 手</span><span>{hand.heroCards}</span><strong className={hand.delta >= 0 ? "gain" : "loss"}>{hand.delta >= 0 ? "+" : ""}¥{hand.delta}</strong>
+                  </button>
+                )) : games.map((demoGame) => (
+                  <button className="table-row" role="row" key={`${demoGame.time}-${demoGame.room}`} onClick={() => flash("完成一手当前锦标赛后，这里会出现可回放的真实记录") }>
+                    <span className="time-cell">{demoGame.time}</span><span className="room-cell"><i>♠</i>{demoGame.room} · 示例</span><span>{demoGame.stakes}</span><span>{demoGame.hands}</span><span>—</span><strong className={demoGame.kind === "win" ? "gain" : "loss"}>{demoGame.result}</strong>
                   </button>
                 ))}
               </div>
             )}
-            <div className="table-footer"><span>显示最近 {recordTab === "funds" ? transactions.length : games.length} 条记录</span><button onClick={() => flash("没有更多记录了")}>加载更多</button></div>
+            <div className="table-footer"><span>显示最近 {recordTab === "funds" ? transactions.length : handHistory.length || games.length} 条记录</span><button onClick={() => flash("没有更多记录了")}>加载更多</button></div>
           </article>
         </section>
+      )}
+
+      {selectedHand && (
+        <div className="replay-backdrop" role="presentation" onClick={() => setSelectedHand(null)}>
+          <section className="replay-panel" role="dialog" aria-modal="true" aria-label={`第 ${selectedHand.handNumber} 手牌回放`} onClick={(event) => event.stopPropagation()}>
+            <div className="replay-heading">
+              <div><p className="eyebrow">HAND REPLAY</p><h2>第 {selectedHand.handNumber} 手 · #{selectedHand.handCode}</h2></div>
+              <button aria-label="关闭回放" onClick={() => setSelectedHand(null)}>×</button>
+            </div>
+            <div className="replay-summary">
+              <span><small>我的底牌</small><b>{selectedHand.heroCards}</b></span>
+              <span><small>公共牌</small><b>{selectedHand.board}</b></span>
+              <span><small>结算</small><b className={selectedHand.delta >= 0 ? "gain" : "loss"}>{selectedHand.result}</b></span>
+            </div>
+            {selectedHand.pots.length > 0 && <div className="replay-pots">{selectedHand.pots.map((pot) => <span key={`${pot.label}-${pot.amount}`}>{pot.label} ¥{pot.amount} → {pot.winnerIds.map((id) => tableNames[id]).join("、")}</span>)}</div>}
+            <ol className="replay-timeline">
+              {selectedHand.actions.map((action, index) => <li key={`${action.name}-${action.text}-${index}`}><i>{index + 1}</i><p><b>{action.name}</b><span>{action.text}</span></p></li>)}
+            </ol>
+          </section>
+        </div>
       )}
 
       <div className={`toast ${notice ? "show" : ""}`} aria-live="polite"><span>✓</span>{notice}</div>
