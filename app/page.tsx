@@ -59,6 +59,7 @@ type PotAward = { label: string; amount: number; winnerIds: string[]; isRefund?:
 type HandResult = { winnerIds: string[]; label: string; amount: number; showdown: boolean; pots: PotAward[] };
 type HandHistoryRecord = {
   id: string;
+  playedAt?: string;
   time: string;
   handNumber: number;
   handCode: number;
@@ -69,6 +70,21 @@ type HandHistoryRecord = {
   delta: number;
   actions: ActionLogItem[];
   pots: PotAward[];
+};
+
+type AccountUser = {
+  userId: string;
+  displayName: string;
+  email: string;
+};
+
+type HistoryStatus = "checking" | "local" | "syncing" | "synced" | "error";
+
+type HistoryApiPayload = {
+  authenticated?: boolean;
+  user?: AccountUser;
+  records?: HandHistoryRecord[];
+  error?: string;
 };
 
 type GameState = {
@@ -641,19 +657,79 @@ const games = [
   { time: "8月15日 20:08", room: "翡翠厅", stakes: "¥5 / ¥10", hands: "51", buyin: "¥2,000", result: "-¥1,120", kind: "loss" },
 ];
 
-const chartData = [
-  { day: "周四", value: 32, label: "+320" },
-  { day: "周五", value: 61, label: "+610" },
-  { day: "周六", value: -28, label: "-280" },
-  { day: "周日", value: 86, label: "+860" },
-  { day: "周一", value: 48, label: "+480" },
-  { day: "周二", value: -41, label: "-410" },
-  { day: "今天", value: 100, label: "+1,680" },
-];
-
 const LOCAL_HISTORY_KEY = "river-poker-hand-history-v1";
+const PENDING_HISTORY_PREFIX = "river-poker-hand-history-pending-v1:";
 const LOCAL_SOUND_KEY = "river-poker-sound-enabled";
 const HERO_TURN_SECONDS = 15;
+
+const pendingHistoryKey = (userId: string) => `${PENDING_HISTORY_PREFIX}${encodeURIComponent(userId)}`;
+
+const dedupeHistory = (records: HandHistoryRecord[]) => {
+  const seen = new Set<string>();
+  return records.filter((record) => {
+    if (!record?.id || seen.has(record.id)) return false;
+    seen.add(record.id);
+    return true;
+  }).slice(0, 100);
+};
+
+const readLocalHistory = (key: string) => {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) ?? "[]") as unknown;
+    if (!Array.isArray(value)) return [];
+    const now = Date.now();
+    return value.filter((item): item is HandHistoryRecord => Boolean(
+      item
+      && typeof item === "object"
+      && typeof (item as HandHistoryRecord).id === "string"
+      && typeof (item as HandHistoryRecord).handNumber === "number"
+      && typeof (item as HandHistoryRecord).handCode === "number"
+      && typeof (item as HandHistoryRecord).delta === "number"
+      && Array.isArray((item as HandHistoryRecord).actions)
+      && Array.isArray((item as HandHistoryRecord).pots),
+    )).slice(0, 100).map((record, index) => ({
+      ...record,
+      playedAt: record.playedAt && Number.isFinite(Date.parse(record.playedAt))
+        ? record.playedAt
+        : new Date(now - index).toISOString(),
+    }));
+  } catch {
+    return [];
+  }
+};
+
+const writeLocalHistory = (key: string, records: HandHistoryRecord[]) => {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(dedupeHistory(records)));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const buildWeeklyChart = (records: HandHistoryRecord[]) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const values = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (6 - index));
+    const next = new Date(date);
+    next.setDate(date.getDate() + 1);
+    const value = records.reduce((sum, record) => {
+      const timestamp = record.playedAt ? Date.parse(record.playedAt) : Number.NaN;
+      return Number.isFinite(timestamp) && timestamp >= date.getTime() && timestamp < next.getTime()
+        ? sum + record.delta
+        : sum;
+    }, 0);
+    return {
+      day: index === 6 ? "今天" : date.toLocaleDateString("zh-CN", { weekday: "short" }),
+      value,
+      label: `${value >= 0 ? "+" : ""}${value.toLocaleString()}`,
+    };
+  });
+  const max = Math.max(1, ...values.map((item) => Math.abs(item.value)));
+  return values.map((item) => ({ ...item, height: `${Math.max(4, Math.round(Math.abs(item.value) / max * 76))}px` }));
+};
 
 export default function Home() {
   const [view, setView] = useState<View>("table");
@@ -664,11 +740,15 @@ export default function Home() {
   const [game, setGame] = useState<GameState>(() => createHand(initialStacks, 1, 829104));
   const [handHistory, setHandHistory] = useState<HandHistoryRecord[]>([]);
   const [selectedHand, setSelectedHand] = useState<HandHistoryRecord | null>(null);
+  const [accountUser, setAccountUser] = useState<AccountUser | null>(null);
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>("checking");
+  const [historyReady, setHistoryReady] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [turnSeconds, setTurnSeconds] = useState(0);
   const actionTimers = useRef<number[]>([]);
   const clientShuffled = useRef(false);
   const historyLoaded = useRef(false);
+  const historySyncInFlight = useRef(false);
   const recordedHands = useRef(new Set<string>());
   const previousSoundState = useRef({ visibleBoard: 0, phase: "" });
 
@@ -692,6 +772,71 @@ export default function Home() {
     }
   };
 
+  const synchronizeHistory = async () => {
+    if (historySyncInFlight.current) return;
+    historySyncInFlight.current = true;
+    const anonymousRecords = readLocalHistory(LOCAL_HISTORY_KEY);
+    let knownUser = accountUser;
+    let remoteRecords = knownUser ? handHistory : [];
+    let pendingRecords: HandHistoryRecord[] = [];
+
+    try {
+      const response = await fetch("/api/hand-history", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as HistoryApiPayload;
+
+      if (response.status === 401) {
+        setAccountUser(null);
+        setHandHistory(anonymousRecords);
+        setHistoryStatus("local");
+        return;
+      }
+
+      if (payload.user) {
+        knownUser = payload.user;
+        setAccountUser(payload.user);
+      }
+      if (knownUser) pendingRecords = readLocalHistory(pendingHistoryKey(knownUser.userId));
+      if (!response.ok || !knownUser) throw new Error(payload.error ?? "读取账号手牌失败");
+
+      remoteRecords = Array.isArray(payload.records) ? payload.records : [];
+      const recordsToSync = dedupeHistory([...anonymousRecords, ...pendingRecords]);
+
+      if (recordsToSync.length > 0) {
+        setHistoryStatus("syncing");
+        const syncResponse = await fetch("/api/hand-history", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ records: recordsToSync }),
+        });
+        const syncPayload = await syncResponse.json().catch(() => ({})) as HistoryApiPayload;
+        if (!syncResponse.ok || !Array.isArray(syncPayload.records)) {
+          throw new Error(syncPayload.error ?? "同步账号手牌失败");
+        }
+        remoteRecords = syncPayload.records;
+        window.localStorage.removeItem(LOCAL_HISTORY_KEY);
+        window.localStorage.removeItem(pendingHistoryKey(knownUser.userId));
+      }
+
+      setHandHistory(dedupeHistory(remoteRecords));
+      setHistoryStatus("synced");
+    } catch {
+      if (knownUser) {
+        const queued = dedupeHistory([...anonymousRecords, ...pendingRecords]);
+        if (queued.length > 0 && writeLocalHistory(pendingHistoryKey(knownUser.userId), queued)) {
+          window.localStorage.removeItem(LOCAL_HISTORY_KEY);
+        }
+        setHandHistory(dedupeHistory([...queued, ...remoteRecords]));
+      } else {
+        setHandHistory(anonymousRecords);
+      }
+      setHistoryStatus("error");
+    } finally {
+      historyLoaded.current = true;
+      setHistoryReady(true);
+      historySyncInFlight.current = false;
+    }
+  };
+
   useEffect(() => {
     if (clientShuffled.current) return;
     clientShuffled.current = true;
@@ -699,15 +844,23 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    try {
-      const storedHistory = JSON.parse(window.localStorage.getItem(LOCAL_HISTORY_KEY) ?? "[]") as HandHistoryRecord[];
-      setHandHistory(Array.isArray(storedHistory) ? storedHistory.slice(0, 100) : []);
+    const soundTimer = window.setTimeout(() => {
       setSoundEnabled(window.localStorage.getItem(LOCAL_SOUND_KEY) === "true");
-    } catch {
-      setHandHistory([]);
-    } finally {
-      historyLoaded.current = true;
-    }
+    }, 0);
+    const historyTimer = window.setTimeout(() => void synchronizeHistory(), 0);
+    const viewTimer = window.setTimeout(() => {
+      if (new URLSearchParams(window.location.search).get("view") === "account") {
+        setRecordTab("games");
+        setView("account");
+      }
+    }, 0);
+    return () => {
+      window.clearTimeout(soundTimer);
+      window.clearTimeout(historyTimer);
+      window.clearTimeout(viewTimer);
+    };
+  // Authentication and history are resolved once on first load; account entry can refresh them later.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => () => {
@@ -728,14 +881,16 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (!historyLoaded.current || game.phase !== "payout" || !game.result || !game.hands.hero) return;
-    const historyId = `${game.handCode}-${game.handNumber}`;
-    if (recordedHands.current.has(historyId)) return;
-    recordedHands.current.add(historyId);
+    if (!historyLoaded.current || !historyReady || game.phase !== "payout" || !game.result || !game.hands.hero) return;
+    const handKey = `${game.handCode}-${game.handNumber}`;
+    if (recordedHands.current.has(handKey)) return;
+    recordedHands.current.add(handKey);
     const delta = game.stacks.hero - game.startingStacks.hero;
+    const playedAt = new Date();
     const record: HandHistoryRecord = {
-      id: historyId,
-      time: new Date().toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+      id: `${handKey}-${playedAt.getTime()}`,
+      playedAt: playedAt.toISOString(),
+      time: playedAt.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }),
       handNumber: game.handNumber,
       handCode: game.handCode,
       stakes: `¥${game.bigBlind / 2} / ¥${game.bigBlind}`,
@@ -746,20 +901,43 @@ export default function Home() {
       actions: game.timeline,
       pots: game.result.pots,
     };
-    setHandHistory((current) => {
-      const next = [record, ...current.filter((item) => item.id !== record.id)].slice(0, 100);
-      try { window.localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify(next)); } catch { /* Device storage may be unavailable. */ }
-      return next;
+    setHandHistory((current) => dedupeHistory([record, ...current]));
+
+    if (!accountUser) {
+      writeLocalHistory(LOCAL_HISTORY_KEY, [record, ...readLocalHistory(LOCAL_HISTORY_KEY)]);
+      return;
+    }
+
+    const pendingKey = pendingHistoryKey(accountUser.userId);
+    const recordsToSync = dedupeHistory([
+      record,
+      ...readLocalHistory(pendingKey),
+      ...readLocalHistory(LOCAL_HISTORY_KEY),
+    ]);
+    void fetch("/api/hand-history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ records: recordsToSync }),
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({})) as HistoryApiPayload;
+      if (!response.ok || !Array.isArray(payload.records)) throw new Error(payload.error ?? "同步失败");
+      setHandHistory(dedupeHistory(payload.records));
+      window.localStorage.removeItem(pendingKey);
+      window.localStorage.removeItem(LOCAL_HISTORY_KEY);
+      setHistoryStatus("synced");
+    }).catch(() => {
+      if (writeLocalHistory(pendingKey, recordsToSync)) window.localStorage.removeItem(LOCAL_HISTORY_KEY);
+      setHistoryStatus("error");
     });
-  }, [game.phase, game.handCode, game.result, game.stacks.hero, game.startingStacks.hero, game.timeline, game.visibleBoard, game.board, game.hands.hero, game.handNumber, game.bigBlind]);
+  }, [historyReady, accountUser, game.phase, game.handCode, game.result, game.stacks.hero, game.startingStacks.hero, game.timeline, game.visibleBoard, game.board, game.hands.hero, game.handNumber, game.bigBlind]);
 
   useEffect(() => {
     if (game.phase !== "betting" || game.actingPlayer !== "hero") {
-      setTurnSeconds(0);
-      return;
+      const resetTimer = window.setTimeout(() => setTurnSeconds(0), 0);
+      return () => window.clearTimeout(resetTimer);
     }
     const deadline = Date.now() + HERO_TURN_SECONDS * 1000;
-    setTurnSeconds(HERO_TURN_SECONDS);
+    const startTimer = window.setTimeout(() => setTurnSeconds(HERO_TURN_SECONDS), 0);
     const timer = window.setInterval(() => {
       const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
       setTurnSeconds(remaining);
@@ -774,9 +952,11 @@ export default function Home() {
       });
       flash("行动超时，系统已自动过牌或弃牌");
     }, 250);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(startTimer);
+      window.clearInterval(timer);
+    };
   // Restart the clock only when the turn actually changes.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.handNumber, game.street, game.phase, game.actingPlayer, game.raisesThisStreet]);
 
   useEffect(() => {
@@ -791,6 +971,7 @@ export default function Home() {
   const openRecords = (tab: RecordTab) => {
     setRecordTab(tab);
     setView("account");
+    void synchronizeHistory();
   };
 
   const resolveShowdown = (current: GameState): GameState => {
@@ -954,14 +1135,16 @@ export default function Home() {
     actionTimers.current.push(timer);
     return () => window.clearTimeout(timer);
   // Street transitions and payouts are intentionally paced for card animations.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [game.handNumber, game.street, game.phase]);
 
   useEffect(() => {
     const committed = game.actions.hero?.committed ?? 0;
     const allInTotal = committed + game.stacks.hero;
-    const minimumTarget = minimumRaiseTarget(game);
-    setRaiseAmount(Math.min(allInTotal, Math.max(minimumTarget, game.bigBlind * 3)));
+    const minimumTarget = game.hasFullBet ? game.callAmount + game.minRaise : game.bigBlind;
+    const timer = window.setTimeout(() => {
+      setRaiseAmount(Math.min(allInTotal, Math.max(minimumTarget, game.bigBlind * 3)));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [game.handNumber, game.street, game.bigBlind, game.callAmount, game.minRaise, game.hasFullBet, game.stacks.hero, game.actions.hero?.committed]);
 
   const restartMatch = () => {
@@ -986,7 +1169,18 @@ export default function Home() {
     || ((game.phase === "payout" || game.phase === "gameover") && Boolean(game.result?.showdown));
   const isResolving = game.phase !== "betting";
   const boardProgressText = game.visibleBoard === 0 ? "等待翻牌" : game.visibleBoard === 3 ? "等待转牌" : game.visibleBoard === 4 ? "等待河牌" : "五张公共牌已发完";
-  const localProfit = handHistory.reduce((sum, hand) => sum + hand.delta, 0);
+  const historyProfit = handHistory.reduce((sum, hand) => sum + hand.delta, 0);
+  const weeklyChart = buildWeeklyChart(handHistory);
+  const weeklyProfit = weeklyChart.reduce((sum, item) => sum + item.value, 0);
+  const bestResult = Math.max(0, ...handHistory.map((hand) => hand.delta));
+  const historyStatusText: Record<HistoryStatus, string> = {
+    checking: "正在确认登录状态",
+    local: "未登录 · 本机演示",
+    syncing: "正在同步账号记录",
+    synced: "账号记录已同步",
+    error: accountUser ? "同步中断 · 记录已安全排队" : "离线 · 本机演示可用",
+  };
+  const accountAvatar = accountUser?.displayName.trim().slice(0, 1) || "游";
 
   return (
     <main className="app-shell">
@@ -1001,10 +1195,10 @@ export default function Home() {
           <button onClick={() => flash("俱乐部功能即将开放")}>俱乐部</button>
         </nav>
         <button className={`sound-toggle ${soundEnabled ? "on" : ""}`} aria-pressed={soundEnabled} onClick={toggleSound}>{soundEnabled ? "♪ 音效开" : "♪ 音效关"}</button>
-        <button className="account-chip" onClick={() => openRecords("funds")} aria-label="打开账户记录">
+        <button className="account-chip" onClick={() => openRecords("games")} aria-label="打开账户记录">
           <span className="status-dot" />
-          <span><small>可用筹码</small><b>¥ 12,840.00</b></span>
-          <span className="avatar">陈</span>
+          <span><small>{accountUser ? "账号手牌" : "本机演示"}</small><b>{accountUser?.displayName ?? "未登录"}</b></span>
+          <span className="avatar">{accountAvatar}</span>
         </button>
       </header>
 
@@ -1174,35 +1368,41 @@ export default function Home() {
               <button className="back-link" onClick={() => setView("table")}>← 返回牌桌</button>
               <p className="eyebrow">ACCOUNT CENTER</p>
               <h1>账户与记录</h1>
-              <p>查看演示资金账户，以及自动保存在本机的真实手牌与行动回放。</p>
+              <p>{accountUser ? `正在查看 ${accountUser.displayName} 的云端手牌与完整行动回放。` : "未登录时牌局保存在本机；登录后会自动同步到你的账号。"}</p>
             </div>
             <div className="account-actions">
-              <button onClick={() => flash("充值通道为演示功能")}>充值</button>
-              <button className="outline" onClick={() => flash("提现申请为演示功能")}>提现</button>
+              {accountUser ? (
+                <>
+                  <button onClick={() => void synchronizeHistory()}>同步记录</button>
+                  <a className="outline" href="/signout-with-chatgpt?return_to=%2F%3Fview%3Daccount">退出登录</a>
+                </>
+              ) : (
+                <a href="/signin-with-chatgpt?return_to=%2F%3Fview%3Daccount">登录并同步</a>
+              )}
             </div>
           </div>
 
           <div className="summary-grid">
             <article className="summary-card balance-card">
-              <span>总账户余额</span>
-              <strong>¥ 12,840.00</strong>
-              <small><i /> 资金账户正常</small>
-              <b className="card-symbol">¥</b>
+              <span>记录模式</span>
+              <strong>{accountUser ? "账号云端" : "本机演示"}</strong>
+              <small><i /> {historyStatusText[historyStatus]}</small>
+              <b className="card-symbol">♠</b>
             </article>
             <article className="summary-card">
-              <span>本机实战盈亏</span>
-              <strong className={localProfit >= 0 ? "gain" : "loss"}>{localProfit >= 0 ? "+" : ""}¥ {localProfit.toLocaleString()}</strong>
-              <small className={localProfit >= 0 ? "positive-pill" : "loss"}>来自当前设备牌局</small>
+              <span>{accountUser ? "账号累计盈亏" : "本机实战盈亏"}</span>
+              <strong className={historyProfit >= 0 ? "gain" : "loss"}>{historyProfit >= 0 ? "+" : ""}¥ {historyProfit.toLocaleString()}</strong>
+              <small className={historyProfit >= 0 ? "positive-pill" : "loss"}>来自已保存的真实牌局</small>
             </article>
             <article className="summary-card">
-              <span>本机已记录</span>
+              <span>{accountUser ? "账号已记录" : "本机已记录"}</span>
               <strong>{handHistory.length} <em>手</em></strong>
               <small>每手均可查看完整行动线</small>
             </article>
             <article className="summary-card">
-              <span>当前等级</span>
-              <strong className="gold-text">River III</strong>
-              <small>距下一等级还需 1,480 XP</small>
+              <span>最大单手盈利</span>
+              <strong className="gold-text">+¥ {bestResult.toLocaleString()}</strong>
+              <small>按当前记录实时计算</small>
             </article>
           </div>
 
@@ -1210,42 +1410,42 @@ export default function Home() {
             <article className="performance-card">
               <div className="card-heading">
                 <div><p className="eyebrow">PERFORMANCE</p><h2>近 7 天盈亏</h2></div>
-                <strong>+¥3,260 <small>本周</small></strong>
+                <strong className={weeklyProfit >= 0 ? "gain" : "loss"}>{weeklyProfit >= 0 ? "+" : ""}¥{weeklyProfit.toLocaleString()} <small>真实手牌</small></strong>
               </div>
               <div className="chart" aria-label="近七天盈亏柱状图">
                 <div className="zero-line" />
-                {chartData.map((item) => (
+                {weeklyChart.map((item) => (
                   <div className="chart-column" key={item.day}>
                     <span className={`bar-value ${item.value < 0 ? "negative" : ""}`}>{item.label}</span>
-                    <div className={`chart-bar ${item.value < 0 ? "down" : ""}`} style={{ height: `${Math.abs(item.value) * .72}px` }} />
+                    <div className={`chart-bar ${item.value < 0 ? "down" : ""}`} style={{ height: item.height }} />
                     <small>{item.day}</small>
                   </div>
                 ))}
               </div>
             </article>
             <aside className="profile-card">
-              <div className="profile-top"><span className="profile-avatar">陈</span><div><b>陈先生</b><small>ID 8829 4106</small></div><i>已认证</i></div>
+              <div className="profile-top"><span className="profile-avatar">{accountAvatar}</span><div><b>{accountUser?.displayName ?? "未登录访客"}</b><small>{accountUser?.email ?? "当前为本机演示模式"}</small></div><i>{accountUser ? "已登录" : "本机"}</i></div>
               <dl>
-                <div><dt>常玩级别</dt><dd>¥5 / ¥10</dd></div>
-                <div><dt>最大单场盈利</dt><dd className="gain">+¥6,420</dd></div>
-                <div><dt>入池率 VPIP</dt><dd>27.8%</dd></div>
+                <div><dt>记录归属</dt><dd>{accountUser ? "当前账号" : "当前浏览器"}</dd></div>
+                <div><dt>累计盈亏</dt><dd className={historyProfit >= 0 ? "gain" : "loss"}>{historyProfit >= 0 ? "+" : ""}¥{historyProfit.toLocaleString()}</dd></div>
+                <div><dt>可回放手牌</dt><dd>{handHistory.length} 手</dd></div>
               </dl>
-              <button onClick={() => flash("个人资料功能即将开放")}>管理账户 →</button>
+              <a href={accountUser ? "/signout-with-chatgpt?return_to=%2F%3Fview%3Daccount" : "/signin-with-chatgpt?return_to=%2F%3Fview%3Daccount"}>{accountUser ? "退出当前账号" : "登录并同步本机记录"} →</a>
             </aside>
           </div>
 
           <article className="records-card">
             <div className="records-toolbar">
               <div className="record-tabs" role="tablist" aria-label="记录类型">
-                <button role="tab" aria-selected={recordTab === "funds"} className={recordTab === "funds" ? "active" : ""} onClick={() => setRecordTab("funds")}>资金流水</button>
+                <button role="tab" aria-selected={recordTab === "funds"} className={recordTab === "funds" ? "active" : ""} onClick={() => setRecordTab("funds")}>演示资金</button>
                 <button role="tab" aria-selected={recordTab === "games"} className={recordTab === "games" ? "active" : ""} onClick={() => setRecordTab("games")}>牌局记录</button>
               </div>
-              <span className="local-record-badge">本机已保存 {handHistory.length} 手</span>
+              <span className={`local-record-badge ${historyStatus === "error" ? "error" : ""}`}>{historyStatusText[historyStatus]} · {handHistory.length} 手</span>
               <select aria-label="记录时间范围" defaultValue="30"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 3 个月</option></select>
             </div>
 
             {recordTab === "funds" ? (
-              <div className="record-table funds-table" role="table" aria-label="资金流水">
+              <div className="record-table funds-table" role="table" aria-label="演示资金流水">
                 <div className="table-row table-head" role="row"><span>时间</span><span>类型 / 说明</span><span>金额</span><span>余额</span></div>
                 {transactions.map((item) => (
                   <div className="table-row" role="row" key={`${item.time}-${item.title}`}>
@@ -1261,23 +1461,26 @@ export default function Home() {
                 <div className="table-row table-head" role="row"><span>时间</span><span>牌桌</span><span>级别</span><span>手数</span><span>我的底牌</span><span>结果</span></div>
                 {handHistory.length > 0 ? handHistory.map((hand) => (
                   <button className="table-row" role="row" key={hand.id} onClick={() => setSelectedHand(hand)}>
-                    <span className="time-cell">{hand.time}</span><span className="room-cell"><i>♠</i>本机锦标赛 #{hand.handCode}</span><span>{hand.stakes}</span><span>第 {hand.handNumber} 手</span><span>{hand.heroCards}</span><strong className={hand.delta >= 0 ? "gain" : "loss"}>{hand.delta >= 0 ? "+" : ""}¥{hand.delta}</strong>
+                    <span className="time-cell">{hand.time}</span><span className="room-cell"><i>♠</i>{accountUser ? "账号" : "本机"}锦标赛 #{hand.handCode}</span><span>{hand.stakes}</span><span>第 {hand.handNumber} 手</span><span>{hand.heroCards}</span><strong className={hand.delta >= 0 ? "gain" : "loss"}>{hand.delta >= 0 ? "+" : ""}¥{hand.delta}</strong>
                   </button>
-                )) : games.map((demoGame) => (
+                )) : accountUser ? (
+                  <div className="empty-history" role="row">{historyStatus === "checking" || historyStatus === "syncing" ? "正在加载账号手牌…" : "这个账号还没有已保存的手牌，完成一手后会自动出现在这里。"}</div>
+                ) : games.map((demoGame) => (
                   <button className="table-row" role="row" key={`${demoGame.time}-${demoGame.room}`} onClick={() => flash("完成一手当前锦标赛后，这里会出现可回放的真实记录") }>
                     <span className="time-cell">{demoGame.time}</span><span className="room-cell"><i>♠</i>{demoGame.room} · 示例</span><span>{demoGame.stakes}</span><span>{demoGame.hands}</span><span>—</span><strong className={demoGame.kind === "win" ? "gain" : "loss"}>{demoGame.result}</strong>
                   </button>
                 ))}
               </div>
             )}
-            <div className="table-footer"><span>显示最近 {recordTab === "funds" ? transactions.length : handHistory.length || games.length} 条记录</span><button onClick={() => flash("没有更多记录了")}>加载更多</button></div>
+            <div className="table-footer"><span>{recordTab === "funds" ? `显示 ${transactions.length} 条演示流水` : `显示最近 ${handHistory.length || (accountUser ? 0 : games.length)} 条记录`}</span><button onClick={() => void synchronizeHistory()}>{accountUser ? "刷新云端" : "检查登录"}</button></div>
           </article>
         </section>
       )}
 
       {selectedHand && (
-        <div className="replay-backdrop" role="presentation" onClick={() => setSelectedHand(null)}>
-          <section className="replay-panel" role="dialog" aria-modal="true" aria-label={`第 ${selectedHand.handNumber} 手牌回放`} onClick={(event) => event.stopPropagation()}>
+        <div className="replay-backdrop">
+          <button className="replay-dismiss-layer" aria-label="关闭回放" onClick={() => setSelectedHand(null)} />
+          <section className="replay-panel" role="dialog" aria-modal="true" aria-label={`第 ${selectedHand.handNumber} 手牌回放`}>
             <div className="replay-heading">
               <div><p className="eyebrow">HAND REPLAY</p><h2>第 {selectedHand.handNumber} 手 · #{selectedHand.handCode}</h2></div>
               <button aria-label="关闭回放" onClick={() => setSelectedHand(null)}>×</button>

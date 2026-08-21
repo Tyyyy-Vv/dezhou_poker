@@ -35,11 +35,15 @@ test("server-renders the River poker experience", async () => {
 });
 
 test("removes starter-only assets and metadata", async () => {
-  const [page, layout, packageJson, styles] = await Promise.all([
+  const [page, layout, packageJson, styles, schema, route, hosting, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/hand-history/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../.openai/hosting.json", import.meta.url), "utf8"),
+    readFile(new URL("../drizzle/0000_romantic_madame_hydra.sql", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /资金流水/);
@@ -54,8 +58,19 @@ test("removes starter-only assets and metadata", async () => {
   assert.match(page, /LOCAL_HISTORY_KEY/);
   assert.match(page, /HERO_TURN_SECONDS/);
   assert.match(page, /replay-timeline/);
+  assert.match(page, /PENDING_HISTORY_PREFIX/);
+  assert.match(page, /\/api\/hand-history/);
+  assert.match(page, /登录并同步本机记录/);
   assert.doesNotMatch(styles, /\.seat\.bottom-left, \.seat\.bottom-right \{ display: none/);
   assert.match(layout, /RIVER 德扑竞技/);
+  assert.match(schema, /pokerHandHistories/);
+  assert.match(schema, /uq_poker_hands_user_client_hand/);
+  assert.match(route, /getChatGPTUser/);
+  assert.match(route, /userId: user\.userId/);
+  assert.match(route, /onConflictDoNothing/);
+  assert.equal(JSON.parse(hosting).d1, "DB");
+  assert.match(migration, /CREATE TABLE `poker_hand_histories`/);
+  assert.match(migration, /PRAGMA optimize/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
   await assert.rejects(access(new URL("../app/_sites-preview/preview.css", import.meta.url)));

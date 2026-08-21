@@ -219,8 +219,8 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .account-heading > div:first-child > p:last-child { margin: 0; color: var(--muted); font-size: 11px; }
 .back-link { display: none; border: 0; padding: 0; background: none; color: var(--muted); margin-bottom: 16px; font-size: 10px; cursor: pointer; }
 .account-actions { display: flex; gap: 8px; }
-.account-actions button { min-width: 82px; padding: 10px 17px; border: 1px solid var(--green); border-radius: 7px; background: var(--green); color: #07140e; font-size: 10px; font-weight: 700; cursor: pointer; }
-.account-actions button.outline { border-color: var(--line); background: #171d1b; color: #bbc2be; }
+.account-actions button, .account-actions a { min-width: 82px; padding: 10px 17px; border: 1px solid var(--green); border-radius: 7px; background: var(--green); color: #07140e; font-size: 10px; font-weight: 700; cursor: pointer; text-align: center; text-decoration: none; }
+.account-actions button.outline, .account-actions a.outline { border-color: var(--line); background: #171d1b; color: #bbc2be; }
 .summary-grid { display: grid; grid-template-columns: 1.45fr repeat(3,1fr); gap: 12px; }
 .summary-card { position: relative; min-height: 127px; padding: 21px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: linear-gradient(145deg, rgba(25,34,31,.9), rgba(13,18,16,.9)); box-shadow: 0 15px 40px rgba(0,0,0,.11); }
 .summary-card > span { display: block; color: var(--muted); font-size: 9px; letter-spacing: .08em; }
@@ -259,7 +259,7 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .profile-card dl > div { display: flex; justify-content: space-between; }
 .profile-card dt { color: var(--muted); font-size: 8px; }
 .profile-card dd { margin: 0; font-size: 9px; font-weight: 700; }
-.profile-card > button { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.02); color: var(--gold); font-size: 8px; cursor: pointer; }
+.profile-card > button, .profile-card > a { width: 100%; padding: 8px; display: block; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.02); color: var(--gold); font-size: 8px; cursor: pointer; text-align: center; text-decoration: none; }
 .records-card { margin-top: 12px; overflow: hidden; }
 .records-toolbar { height: 62px; padding: 0 21px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .record-tabs { display: flex; align-self: stretch; gap: 25px; }
@@ -268,12 +268,14 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .record-tabs button.active:after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--gold); }
 .records-toolbar select { padding: 7px 28px 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: #171d1b; color: #9da6a1; font-size: 8px; }
 .local-record-badge { margin-left: auto; margin-right: 10px; padding: 4px 7px; border: 1px solid rgba(56,224,140,.18); border-radius: 999px; color: var(--green); font-size: 7px; }
+.local-record-badge.error { border-color: rgba(196,106,106,.25); color: #c98282; }
 .record-table { width: 100%; }
 .table-row { min-height: 57px; padding: 0 21px; display: grid; align-items: center; border-bottom: 1px solid rgba(255,255,255,.045); color: #b6bdb9; font-size: 9px; }
 .funds-table .table-row { grid-template-columns: 1fr 2.2fr 1fr 1fr; }
 .games-table .table-row { grid-template-columns: 1.15fr 1.6fr .85fr .65fr .85fr .8fr; }
 .games-table button.table-row { width: 100%; border: 0; border-bottom: 1px solid rgba(255,255,255,.045); background: none; text-align: left; cursor: pointer; }
 .games-table button.table-row:hover, .record-table .table-row:not(.table-head):hover { background: rgba(255,255,255,.018); }
+.empty-history { min-height: 114px; display: grid; place-items: center; padding: 24px; color: var(--muted); font-size: 9px; text-align: center; }
 .table-row > strong { font: 11px Georgia, serif; }
 .table-head { min-height: 35px; color: #58615d; font-size: 7px; letter-spacing: .1em; text-transform: uppercase; }
 .time-cell { color: #78817d; }
@@ -288,7 +290,8 @@ h1 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 25px; lette
 .table-footer { height: 48px; padding: 0 21px; display: flex; align-items: center; justify-content: space-between; color: #5c6561; font-size: 7px; }
 .table-footer button { border: 0; background: none; color: var(--gold); font-size: 8px; cursor: pointer; }
 .replay-backdrop { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; background: rgba(2,5,4,.8); backdrop-filter: blur(12px); }
-.replay-panel { width: min(650px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 24px; border: 1px solid rgba(218,191,119,.24); border-radius: 13px; background: linear-gradient(145deg, #151d19, #0b100e); box-shadow: 0 28px 80px rgba(0,0,0,.65); }
+.replay-dismiss-layer { position: absolute; inset: 0; border: 0; background: transparent; cursor: default; }
+.replay-panel { position: relative; z-index: 1; width: min(650px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 24px; border: 1px solid rgba(218,191,119,.24); border-radius: 13px; background: linear-gradient(145deg, #151d19, #0b100e); box-shadow: 0 28px 80px rgba(0,0,0,.65); }
 .replay-heading { display: flex; align-items: flex-start; justify-content: space-between; }
 .replay-heading h2 { margin: 0; font: 22px Georgia, serif; }
 .replay-heading > button { width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; background: rgba(255,255,255,.03); color: var(--muted); cursor: pointer; font-size: 18px; }
