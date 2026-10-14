@@ -1,5 +1,13 @@
 # RIVER 德扑竞技
 
+## 🎮 在线游玩
+
+**[点击进入 RIVER 德扑竞技 →](https://river-poker-table-cn.xty-811811.chatgpt.site)**
+
+无需下载或安装，打开浏览器即可与 AI 对战。游客可直接游玩并保存本机记录；登录后可同步账号手牌记录。
+
+GitHub 仓库右侧 **About → Website** 也提供同一个试玩入口。
+
 一款中文德州扑克 Web 应用：你与 5 名 AI 对手同桌竞技，从翻牌前一路进行到河牌摊牌，直到一名玩家赢得全部筹码。包含沉浸式牌桌、行动倒计时、自动结算，以及可回看的手牌记录。
 
 ![RIVER 德扑竞技界面预览](public/og.png)
@@ -84,7 +92,9 @@ npm run dev
 
 ### 登录和托管
 
-仓库沿用 Sites / Cloudflare Workers 的运行配置，**不是可直接部署到 GitHub Pages 的纯静态站点**。上传到 GitHub 只托管源码，不会自动上线应用。
+当前在线版本已部署到 **Sites / Cloudflare Workers**，通过上方「在线游玩」链接访问；GitHub 托管源码并提供试玩入口。项目包含账号记录 API 和 D1 数据库，**不是可直接部署到 GitHub Pages 的纯静态站点**。
+
+目前 GitHub 推送不会自动触发 Sites 发布；游戏代码更新后，需要通过 Sites 发布流程部署新版本。
 
 在支持的托管环境中，登录入口 `/signin-with-chatgpt`、退出入口 `/signout-with-chatgpt` 和 `/callback` 由平台接管。`app/chatgpt-auth.ts` 读取平台注入的身份请求头；应用自身不实现 OAuth 流程。
 
